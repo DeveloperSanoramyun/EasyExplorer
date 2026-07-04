@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026 myungsanjun. All rights reserved.</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
+	<key>CFBundleDisplayName</key>
+	<string>FileExplorer</string>
+	<!-- TCC usage descriptions: macOS prompts on first access to each
+	     protected location and uses these strings in the dialog. Without
+	     them the prompt body would be blank, which is how Finder-class
+	     apps look out-of-the-box on first launch. -->
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>FileExplorer needs access to your Desktop to list and manage files there.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>FileExplorer needs access to your Documents folder to list and manage files there.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>FileExplorer needs access to your Downloads folder to list and manage files there.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>FileExplorer needs access to external drives so they show up in the sidebar and you can browse them.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>FileExplorer needs access to network volumes so you can browse mounted shares.</string>
+	<!-- AppleScript-driven Trash actions (Empty Trash, Restore from
+	     Trash, Show Original Location) talk to Finder. macOS requires
+	     this string for the Automation consent prompt. -->
+	<key>NSAppleEventsUsageDescription</key>
+	<string>FileExplorer uses Finder via AppleScript to empty the Trash, restore trashed items to their original locations, and look up where an item came from.</string>
+	<!-- The app is a Finder replacement; opting OUT of light/dark
+	     auto-switch would be jarring. Explicitly support both. -->
+	<key>NSRequiresAquaSystemAppearance</key>
+	<false/>
+</dict>
+</plist>

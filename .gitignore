@@ -1,0 +1,36 @@
+# Xcode
+#
+build/
+DerivedData/
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+!default.pbxuser
+!default.mode1v3
+!default.mode2v3
+!default.perspectivev3
+xcuserdata/
+*.xccheckout
+*.moved-aside
+*.xcuserstate
+*.xcscmblueprint
+
+# Swift Package Manager
+.build/
+Packages/
+Package.pins
+Package.resolved
+*.xcodeproj/xcuserdata
+.swiftpm
+
+# CocoaPods / Carthage (unused here, kept for safety if ever added)
+Pods/
+Carthage/Build/
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
