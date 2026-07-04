@@ -49,6 +49,7 @@ struct AddressBar: View {
             // actually type. The view-mode picker is fine in the
             // toolbar (just buttons, no input).
             searchField
+            filterToggle
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
@@ -120,6 +121,38 @@ struct AddressBar: View {
             if tab.searchScope != .folder { tab.searchScope = .folder }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
         }
+    }
+
+    // MARK: - Filter toggle
+
+    /// Opens/closes `SearchFilterBar`'s Kind/Size/Date chips independent
+    /// of search — that bar otherwise only shows once a search query or
+    /// a filter is already active, which is a chicken-and-egg problem
+    /// for setting the FIRST filter from a cold start (browsing a
+    /// folder, not searching). Filled + accent-tinted whenever a filter
+    /// is actually narrowing the list, so it's visible at a glance even
+    /// if the chip row itself has been manually collapsed again.
+    private var filterToggle: some View {
+        Button {
+            if isFilterBarShowing {
+                tab.filterBarVisible = false
+                tab.resetSearchFilters()
+            } else {
+                tab.filterBarVisible = true
+            }
+        } label: {
+            Image(systemName: tab.hasActiveSearchFilter
+                              ? "line.3.horizontal.decrease.circle.fill"
+                              : "line.3.horizontal.decrease.circle")
+                .foregroundStyle(tab.hasActiveSearchFilter ? Color.accentColor : Color.secondary)
+                .feFont(size: 13)
+        }
+        .buttonStyle(.borderless)
+        .help(isFilterBarShowing ? "Hide filters" : "Filter by kind, size, or date")
+    }
+
+    private var isFilterBarShowing: Bool {
+        !tab.searchQuery.isEmpty || tab.hasActiveSearchFilter || tab.filterBarVisible
     }
 
     private var searchPlaceholder: String {

@@ -112,6 +112,24 @@ final class TabViewModel: ObservableObject, Identifiable {
         DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: work)
     }
 
+    /// Transient in-app success banner ("Moved 3 items"). Used as the
+    /// fallback for `NotificationService.notifyOperationCompleted` when
+    /// the user has denied (or not yet responded to) the system
+    /// notification permission — without this, a completed multi-hour
+    /// transfer produced no feedback anywhere once notifications were
+    /// off. Auto-clears faster than the error banner since it's not
+    /// something the user needs time to read/act on.
+    @Published var successMessage: String? = nil
+    private var successDismissWork: DispatchWorkItem? = nil
+
+    func reportSuccess(_ message: String) {
+        successMessage = message
+        successDismissWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.successMessage = nil }
+        successDismissWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
+    }
+
     /// Set when `listDirectory` throws a TCC-protected `permissionDenied`
     /// error. Drives the "Grant Full Disk Access" guidance panel so the
     /// user has a direct path to fixing the access denial.
@@ -196,6 +214,13 @@ final class TabViewModel: ObservableObject, Identifiable {
     @Published var searchDateFilter: DateFilter = .all {
         didSet { objectWillChange.send() }
     }
+    /// Manually toggled via AddressBar's funnel button so the kind/size/
+    /// date filter chips are reachable even when the user isn't
+    /// currently searching — `visibleItems` already applies these
+    /// filters unconditionally (see `hasActiveSearchFilter`); this flag
+    /// only controls whether `SearchFilterBar` is showing so there's a
+    /// way to SET a filter from a cold start (no search, no filter yet).
+    @Published var filterBarVisible: Bool = false
 
     enum KindFilter: String, CaseIterable, Identifiable {
         case all = "All Kinds"
@@ -1247,7 +1272,8 @@ final class TabViewModel: ObservableObject, Identifiable {
                 NotificationService.notifyOperationCompleted(
                     title: "\(verb.capitalized) \(count) item\(count == 1 ? "" : "s")",
                     body: destination.lastPathComponent,
-                    elapsed: elapsed
+                    elapsed: elapsed,
+                    tab: self
                 )
             }
         }

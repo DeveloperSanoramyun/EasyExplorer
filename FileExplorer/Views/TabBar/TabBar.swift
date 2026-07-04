@@ -17,6 +17,10 @@ struct TabBar: View {
     /// transferable URL so AppKit's NSItemProvider plumbing accepts it;
     /// the real intent is just "this tab id is moving".
     @State private var draggingTabID: UUID? = nil
+    /// Opens a new window pre-seeded with a URL — see `FileExplorerApp`'s
+    /// `WindowGroup(for: URL.self)` and `ContentView.init(tornOffTabURL:)`.
+    /// Backs the "Move to New Window" tab context-menu item below.
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         HStack(spacing: 0) {
@@ -31,6 +35,26 @@ struct TabBar: View {
                             onClose:  { window.closeTab(at: index) },
                             onMiddleClick: { window.closeTab(at: index) }
                         )
+                        .contextMenu {
+                            Button("New Tab") { window.newTab() }
+                            Divider()
+                            Button("Close Tab") { window.closeTab(at: index) }
+                            // Dragging a tab out to tear it off needs a
+                            // native NSDraggingSession to know the drop
+                            // point relative to the window, which isn't
+                            // reliably testable without live UI access —
+                            // this menu command is the equivalent,
+                            // reliable entry point. Disabled for the
+                            // window's only tab, same as Safari/Chrome:
+                            // there'd be nothing left behind to tear off
+                            // FROM.
+                            Button("Move to New Window") {
+                                let url = tab.currentURL
+                                openWindow(value: url)
+                                window.closeTab(at: index)
+                            }
+                            .disabled(window.tabs.count <= 1)
+                        }
                         .onDrag {
                             draggingTabID = tab.id
                             // SwiftUI's `.onDrag` doesn't surface

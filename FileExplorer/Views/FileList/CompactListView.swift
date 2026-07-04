@@ -12,6 +12,10 @@
 //  LazyVStack so the same DragGesture-based lasso used by IconsGridView
 //  works here too.
 //
+//  The lasso gesture, drop-mode/drop-into logic, and context menus are
+//  shared with GroupedListView/IconsGridView via RowInteraction.swift —
+//  see that file for the shared implementations.
+//
 
 import SwiftUI
 import AppKit
@@ -21,9 +25,9 @@ struct CompactListView: View {
     @ObservedObject private var clipboard = ClipboardService.shared
     @AppStorage("fe.showExtensions") private var showExtensions: Bool = true
 
-    // Lasso state — mirrors IconsGridView. See that file for the
-    // rationale on PreferenceKey + DragGesture + base-selection
-    // capture; the row layout is the only thing that differs.
+    // Lasso state — mirrors IconsGridView/GroupedListView. See
+    // RowInteraction.swift's `lassoSelectionGesture` for the gesture
+    // logic these feed into via Binding.
     @State private var itemFrames: [URL: CGRect] = [:]
     @State private var lassoRect: CGRect? = nil
     @State private var baseSelection: Set<URL> = []
@@ -36,19 +40,6 @@ struct CompactListView: View {
     /// don't accidentally enter rename for the wrong file.
     @State private var slowRename = SlowClickRename()
 
-    /// Move/copy dropped items into `folder` (a directory row). ⌥ forces
-    /// copy, ⌘ forces move; otherwise same-volume default applies.
-    private func dropInto(_ folder: URL, _ dropped: [URL]) -> Bool {
-        guard FileSystemService.isReadableDirectory(folder) else { return false }
-        let sources = dropped.filter { $0 != folder && $0.deletingLastPathComponent() != folder }
-        guard !sources.isEmpty else { return false }
-        let mods = NSEvent.modifierFlags
-        let mode: TabViewModel.DropMode = mods.contains(.option) ? .copy
-            : mods.contains(.command) ? .move : .auto
-        tab.transferDropped(sources, to: folder, mode: mode)
-        return true
-    }
-
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -57,7 +48,7 @@ struct CompactListView: View {
                         ForEach(tab.visibleItems) { item in
                             row(for: item)
                                 .id(item.url)
-                                .background(frameReporter(for: item.url))
+                                .background(lassoFrameReporter(for: item.url))
                                 // .onDrag (not .draggable) so drag START
                                 // can register the multi-selection this
                                 // drag stands for — see beginRowDrag.
@@ -67,7 +58,7 @@ struct CompactListView: View {
                                 .folderDropTarget(
                                     isFolder: FileSystemService.isReadableDirectory(item.url)
                                 ) { droppedURLs in
-                                    dropInto(item.url, droppedURLs)
+                                    fileListDropInto(item.url, dropped: droppedURLs, tab: tab)
                                 }
                         }
                     }
@@ -86,7 +77,18 @@ struct CompactListView: View {
                     }
                 }
                 .coordinateSpace(name: "lasso")
-                .gesture(lassoGesture(proxy: proxy))
+                .gesture(
+                    lassoSelectionGesture(
+                        itemFrames: itemFrames,
+                        lassoRect: $lassoRect,
+                        baseSelection: $baseSelection,
+                        lastAutoScroll: $lastAutoScroll,
+                        flatItems: tab.visibleItems,
+                        edgeZone: 30,
+                        tab: tab,
+                        proxy: proxy
+                    )
+                )
             }
             .background(.background)
             .onPreferenceChange(ItemFramePreferenceKey.self) { frames in
@@ -102,15 +104,22 @@ struct CompactListView: View {
             .onChange(of: tab.renamingItemID) { _, _ in
                 slowRename.renameDidChange()
             }
-            .contextMenu { blankContextMenu }
+            .contextMenu {
+                fileListBlankContextMenu(tab: tab) {
+                    Menu("View") {
+                        ForEach(FileViewMode.allCases) { mode in
+                            Button(mode.displayName) {
+                                NotificationCenter.default.post(
+                                    name: .feSetViewMode, object: nil,
+                                    userInfo: ["mode": mode.rawValue]
+                                )
+                            }
+                        }
+                    }
+                }
+            }
             .dropDestination(for: URL.self) { droppedURLs, _ in
-                let sources = droppedURLs.filter { $0.deletingLastPathComponent() != tab.currentURL }
-                guard !sources.isEmpty else { return false }
-                let mods = NSEvent.modifierFlags
-                let mode: TabViewModel.DropMode = mods.contains(.option) ? .copy
-                    : mods.contains(.command) ? .move : .auto
-                tab.transferDropped(sources, to: tab.currentURL, mode: mode)
-                return true
+                fileListDropIntoCurrentFolder(droppedURLs, tab: tab)
             }
             .contentShape(Rectangle())
             .onTapGesture { tab.selectedIDs.removeAll() }
@@ -164,7 +173,7 @@ struct CompactListView: View {
         .onTapGesture(count: 2) {
             slowRename.noteOpened()
             slowRename.cancel()
-            openItem(item)
+            openFileListEntry(item.url, tab: tab)
         }
         .simultaneousGesture(
             TapGesture(count: 1).onEnded {
@@ -173,206 +182,6 @@ struct CompactListView: View {
                               tab: tab, slowRename: slowRename)
             }
         )
-        .contextMenu { rowContextMenu(for: item.url) }
-    }
-
-    // MARK: - Open
-
-    private func openItem(_ item: FileItem) {
-        if FileSystemService.isReadableDirectory(item.url) {
-            tab.navigate(to: item.url)
-        } else {
-            NSWorkspace.shared.open(item.url)
-        }
-    }
-
-    // MARK: - Lasso plumbing
-
-    private func frameReporter(for url: URL) -> some View {
-        GeometryReader { proxy in
-            Color.clear.preference(
-                key: ItemFramePreferenceKey.self,
-                value: [url: proxy.frame(in: .named("lasso"))]
-            )
-        }
-    }
-
-    private func lassoGesture(proxy: ScrollViewProxy) -> some Gesture {
-        DragGesture(minimumDistance: 4, coordinateSpace: .named("lasso"))
-            .onChanged { value in
-                if lassoRect == nil {
-                    baseSelection = tab.selectedIDs
-                }
-                let rect = CGRect(
-                    x: min(value.startLocation.x, value.location.x),
-                    y: min(value.startLocation.y, value.location.y),
-                    width: abs(value.location.x - value.startLocation.x),
-                    height: abs(value.location.y - value.startLocation.y)
-                )
-                lassoRect = rect
-
-                var hits: Set<URL> = []
-                for (url, frame) in itemFrames where rect.intersects(frame) {
-                    hits.insert(url)
-                }
-                let mods = NSEvent.modifierFlags
-                if mods.contains(.command) {
-                    tab.selectedIDs = baseSelection.symmetricDifference(hits)
-                } else if mods.contains(.shift) {
-                    tab.selectedIDs = baseSelection.union(hits)
-                } else {
-                    tab.selectedIDs = hits
-                }
-                autoScrollIfNeeded(value: value, proxy: proxy)
-            }
-            .onEnded { _ in
-                lassoRect = nil
-                baseSelection = []
-            }
-    }
-
-    /// See IconsGridView.autoScrollIfNeeded for the rationale — same
-    /// throttled "scroll a few rows ahead when the marquee touches
-    /// the visible edge" logic.
-    private func autoScrollIfNeeded(value: DragGesture.Value, proxy: ScrollViewProxy) {
-        guard !itemFrames.isEmpty,
-              Date().timeIntervalSince(lastAutoScroll) > 0.08 else { return }
-        let edgeZone: CGFloat = 30
-        let frames = itemFrames.values
-        guard let topY = frames.map(\.minY).min(),
-              let bottomY = frames.map(\.maxY).max() else { return }
-
-        if value.location.y < topY + edgeZone {
-            if let topItem = itemFrames.min(by: { $0.value.minY < $1.value.minY })?.key,
-               let idx = tab.visibleItems.firstIndex(where: { $0.url == topItem }),
-               idx > 0 {
-                proxy.scrollTo(tab.visibleItems[max(0, idx - 3)].url, anchor: .top)
-                lastAutoScroll = Date()
-            }
-        } else if value.location.y > bottomY - edgeZone {
-            if let bottomItem = itemFrames.max(by: { $0.value.maxY < $1.value.maxY })?.key,
-               let idx = tab.visibleItems.firstIndex(where: { $0.url == bottomItem }),
-               idx < tab.visibleItems.count - 1 {
-                proxy.scrollTo(tab.visibleItems[min(tab.visibleItems.count - 1, idx + 3)].url, anchor: .bottom)
-                lastAutoScroll = Date()
-            }
-        }
-    }
-
-    // MARK: - Context menus
-
-    @ViewBuilder
-    private func rowContextMenu(for url: URL) -> some View {
-        Button("Open") {
-            if FileSystemService.isReadableDirectory(url) {
-                tab.navigate(to: url)
-            } else {
-                NSWorkspace.shared.open(url)
-            }
-        }
-        if !FileSystemService.isReadableDirectory(url) {
-            openWithMenu(for: url)
-        }
-        Divider()
-        Button("Cut") {
-            ensureSelection(includes: url)
-            ClipboardService.shared.cut(Array(tab.selectedIDs))
-        }
-        Button("Copy") {
-            ensureSelection(includes: url)
-            ClipboardService.shared.copy(Array(tab.selectedIDs))
-        }
-        Button("Paste") { tab.paste() }
-            .disabled(!ClipboardService.shared.hasContent)
-        Button("Copy Path") {
-            ensureSelection(includes: url)
-            ClipboardService.copyPathsToPasteboard(Array(tab.selectedIDs))
-        }
-        Divider()
-        Button("Move to Trash") {
-            ensureSelection(includes: url)
-            tab.moveSelectedToTrash()
-        }
-        Divider()
-        Button("Show in Finder") {
-            ensureSelection(includes: url)
-            NSWorkspace.shared.activateFileViewerSelecting(Array(tab.selectedIDs))
-        }
-        Button("Share…") {
-            ensureSelection(includes: url)
-            ShareService.showPicker(for: Array(tab.selectedIDs))
-        }
-    }
-
-    @ViewBuilder
-    private var blankContextMenu: some View {
-        Menu("New") {
-            Button("Folder") { tab.createNewFolder() }
-            Button("Text File") {
-                tab.createNewFile(baseName: "New Text File", extension: "txt")
-            }
-        }
-        Divider()
-        Button("Paste") { tab.paste() }
-            .disabled(!ClipboardService.shared.hasContent)
-        Button("Copy Folder Path") {
-            ClipboardService.copyPathsToPasteboard([tab.currentURL])
-        }
-        Button("Open in Terminal") {
-            TerminalLauncher.open(tab.currentURL)
-        }
-        Button("Show in Finder") {
-            NSWorkspace.shared.activateFileViewerSelecting([tab.currentURL])
-        }
-        Divider()
-        Menu("Sort By") {
-            ForEach(FileItem.SortKey.allCases) { key in
-                Button(key.rawValue) { tab.setSort(key) }
-            }
-        }
-        Menu("View") {
-            ForEach(FileViewMode.allCases) { mode in
-                Button(mode.displayName) {
-                    NotificationCenter.default.post(
-                        name: .feSetViewMode, object: nil,
-                        userInfo: ["mode": mode.rawValue]
-                    )
-                }
-            }
-        }
-        Divider()
-        Button("Refresh") { tab.reload() }
-    }
-
-    /// Promote the right-clicked row to selection when it wasn't already
-    /// part of the multi-selection — same rule as Finder / Explorer.
-    private func ensureSelection(includes url: URL) {
-        if !tab.selectedIDs.contains(url) {
-            tab.selectedIDs = [url]
-        }
-    }
-
-    @ViewBuilder
-    private func openWithMenu(for url: URL) -> some View {
-        Menu("Open With") {
-            let apps = AppLauncherService.applications(handlerFor: url)
-            ForEach(apps) { app in
-                Button {
-                    AppLauncherService.open([url], with: app.url)
-                } label: {
-                    Label {
-                        Text(app.isDefault ? "\(app.name) (default)" : app.name)
-                    } icon: {
-                        Image(nsImage: app.icon)
-                    }
-                }
-            }
-            if !apps.isEmpty {
-                Divider()
-            }
-            Button("Other Application…") {
-                AppLauncherService.chooseApplication(for: [url])
-            }
-        }
+        .contextMenu { fileListRowContextMenu(for: item.url, tab: tab) }
     }
 }

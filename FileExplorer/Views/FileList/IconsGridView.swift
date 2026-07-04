@@ -37,7 +37,9 @@ struct IconsGridView: View {
     // pass by the GeometryReader backings on each tile. `lassoRect`
     // drives the on-screen rubber-band overlay; `baseSelection` lets
     // ⌘/⇧-drag operate on top of the selection that existed before the
-    // drag started instead of clobbering it mid-stroke.
+    // drag started instead of clobbering it mid-stroke. The gesture and
+    // drop logic these feed into is shared with CompactListView/
+    // GroupedListView via RowInteraction.swift.
     @State private var itemFrames: [URL: CGRect] = [:]
     @State private var lassoRect: CGRect? = nil
     @State private var baseSelection: Set<URL> = []
@@ -48,14 +50,6 @@ struct IconsGridView: View {
     /// Finder-style slow-double-click → rename timer. See CompactListView
     /// for the rationale.
     @State private var slowRename = SlowClickRename()
-
-    private func dropInto(_ folder: URL, _ dropped: [URL]) -> Bool {
-        guard FileSystemService.isReadableDirectory(folder) else { return false }
-        let sources = dropped.filter { $0 != folder && $0.deletingLastPathComponent() != folder }
-        guard !sources.isEmpty else { return false }
-        tab.transferDropped(sources, to: folder, mode: dropMode())
-        return true
-    }
 
     private var columns: [GridItem] {
         [GridItem(.adaptive(minimum: sizeMode.gridColumnMin,
@@ -88,22 +82,22 @@ struct IconsGridView: View {
                                 onDoubleClick: {
                                     slowRename.noteOpened()
                                     slowRename.cancel()
-                                    openItem(item)
+                                    openFileListEntry(item.url, tab: tab)
                                 },
                                 onCommitRename: { newName in tab.commitRename(item.url, to: newName) },
                                 onCancelRename: { tab.cancelRename() }
                             )
                             .id(item.url)
-                            .background(frameReporter(for: item.url))
+                            .background(lassoFrameReporter(for: item.url))
                             // Multi-selection-aware drag source — see
                             // beginRowDrag.
                             .onDrag { beginRowDrag(item.url, tab: tab) }
                             .folderDropTarget(
                                 isFolder: FileSystemService.isReadableDirectory(item.url)
                             ) { droppedURLs in
-                                dropInto(item.url, droppedURLs)
+                                fileListDropInto(item.url, dropped: droppedURLs, tab: tab)
                             }
-                            .contextMenu { tileContextMenu(for: item.url) }
+                            .contextMenu { fileListRowContextMenu(for: item.url, tab: tab) }
                         }
                     }
                     .padding(10)
@@ -124,7 +118,18 @@ struct IconsGridView: View {
                 // `.gesture` (not `.simultaneousGesture` / `.highPriority`)
                 // gives child gestures precedence — a drag that starts on
                 // a tile still triggers `.draggable` rather than the lasso.
-                .gesture(lassoGesture(proxy: proxy))
+                .gesture(
+                    lassoSelectionGesture(
+                        itemFrames: itemFrames,
+                        lassoRect: $lassoRect,
+                        baseSelection: $baseSelection,
+                        lastAutoScroll: $lastAutoScroll,
+                        flatItems: tab.visibleItems,
+                        edgeZone: 40,
+                        tab: tab,
+                        proxy: proxy
+                    )
+                )
             }
             .background(Color(nsColor: .controlBackgroundColor).opacity(0.4))
             .onPreferenceChange(ItemFramePreferenceKey.self) { frames in
@@ -146,253 +151,28 @@ struct IconsGridView: View {
             }
             // Drop into the current folder anywhere on the grid.
             .dropDestination(for: URL.self) { droppedURLs, _ in
-                let sources = droppedURLs.filter { $0.deletingLastPathComponent() != tab.currentURL }
-                guard !sources.isEmpty else { return false }
-                tab.transferDropped(sources, to: tab.currentURL, mode: dropMode())
-                return true
+                fileListDropIntoCurrentFolder(droppedURLs, tab: tab)
             }
             // Clicking blank space deselects (tap only — drag becomes lasso).
             .contentShape(Rectangle())
             .onTapGesture { tab.selectedIDs.removeAll() }
-            .contextMenu { blankContextMenu }
-            // Pass the live tile frames so arrow keys navigate the grid
-            // in 2D (←→ columns, ↑↓ rows) instead of linear flow order.
-            .feKeyboardNavigation(tab: tab, gridFrames: itemFrames)
-        }
-    }
-
-    @ViewBuilder
-    private var blankContextMenu: some View {
-        Menu("New") {
-            Button("Folder") { tab.createNewFolder() }
-            Button("Text File") {
-                tab.createNewFile(baseName: "New Text File", extension: "txt")
-            }
-        }
-        Divider()
-        Button("Paste") { tab.paste() }
-            .disabled(!ClipboardService.shared.hasContent)
-        Button("Copy Folder Path") {
-            ClipboardService.copyPathsToPasteboard([tab.currentURL])
-        }
-        Button("Open in Terminal") {
-            TerminalLauncher.open(tab.currentURL)
-        }
-        Button("Show in Finder") {
-            NSWorkspace.shared.activateFileViewerSelecting([tab.currentURL])
-        }
-        Divider()
-        Menu("Sort By") {
-            ForEach(FileItem.SortKey.allCases) { key in
-                Button(key.rawValue) { tab.setSort(key) }
-            }
-        }
-        Menu("View") {
-            ForEach(FileViewMode.allCases) { mode in
-                Button(mode.displayName) {
-                    NotificationCenter.default.post(
-                        name: .feSetViewMode, object: nil,
-                        userInfo: ["mode": mode.rawValue]
-                    )
-                }
-            }
-        }
-        Divider()
-        Button("Refresh") { tab.reload() }
-    }
-
-    // MARK: - Lasso
-
-    /// Each tile renders an invisible GeometryReader behind itself; the
-    /// reader publishes its frame as a preference value keyed by URL.
-    /// The parent collects them via onPreferenceChange.
-    private func frameReporter(for url: URL) -> some View {
-        GeometryReader { proxy in
-            Color.clear.preference(
-                key: ItemFramePreferenceKey.self,
-                value: [url: proxy.frame(in: .named("lasso"))]
-            )
-        }
-    }
-
-    private func lassoGesture(proxy: ScrollViewProxy) -> some Gesture {
-        DragGesture(minimumDistance: 4, coordinateSpace: .named("lasso"))
-            .onChanged { value in
-                if lassoRect == nil {
-                    // First tick of the drag — remember the selection
-                    // we started with so modifier-keys can layer their
-                    // behaviour on top.
-                    baseSelection = tab.selectedIDs
-                }
-                let rect = CGRect(
-                    x: min(value.startLocation.x, value.location.x),
-                    y: min(value.startLocation.y, value.location.y),
-                    width: abs(value.location.x - value.startLocation.x),
-                    height: abs(value.location.y - value.startLocation.y)
-                )
-                lassoRect = rect
-
-                var hits: Set<URL> = []
-                for (url, frame) in itemFrames where rect.intersects(frame) {
-                    hits.insert(url)
-                }
-
-                // Read modifiers live — DragGesture doesn't pass them.
-                let mods = NSEvent.modifierFlags
-                if mods.contains(.command) {
-                    tab.selectedIDs = baseSelection.symmetricDifference(hits)
-                } else if mods.contains(.shift) {
-                    tab.selectedIDs = baseSelection.union(hits)
-                } else {
-                    tab.selectedIDs = hits
-                }
-
-                autoScrollIfNeeded(value: value, proxy: proxy)
-            }
-            .onEnded { _ in
-                lassoRect = nil
-                baseSelection = []
-            }
-    }
-
-    /// When the marquee cursor sits near the top or bottom of the
-    /// visible items, nudge the ScrollView so off-screen items come
-    /// into hit-test range. Throttled to ~10Hz; without that the
-    /// gesture's 60-fps onChanged loop would scroll dozens of rows a
-    /// second and overshoot.
-    private func autoScrollIfNeeded(value: DragGesture.Value, proxy: ScrollViewProxy) {
-        guard !itemFrames.isEmpty else { return }
-        guard Date().timeIntervalSince(lastAutoScroll) > 0.08 else { return }
-
-        let edgeZone: CGFloat = 40
-        let frames = itemFrames.values
-        guard let topY = frames.map(\.minY).min(),
-              let bottomY = frames.map(\.maxY).max() else { return }
-
-        if value.location.y < topY + edgeZone {
-            // Near top — scroll up by stepping a few rows behind the
-            // currently topmost visible tile.
-            if let topItem = itemFrames.min(by: { $0.value.minY < $1.value.minY })?.key,
-               let idx = tab.visibleItems.firstIndex(where: { $0.url == topItem }),
-               idx > 0 {
-                let target = tab.visibleItems[max(0, idx - 3)].url
-                proxy.scrollTo(target, anchor: .top)
-                lastAutoScroll = Date()
-            }
-        } else if value.location.y > bottomY - edgeZone {
-            // Near bottom — scroll down.
-            if let bottomItem = itemFrames.max(by: { $0.value.maxY < $1.value.maxY })?.key,
-               let idx = tab.visibleItems.firstIndex(where: { $0.url == bottomItem }),
-               idx < tab.visibleItems.count - 1 {
-                let target = tab.visibleItems[min(tab.visibleItems.count - 1, idx + 3)].url
-                proxy.scrollTo(target, anchor: .bottom)
-                lastAutoScroll = Date()
-            }
-        }
-    }
-
-    // MARK: - Open
-
-    private func openItem(_ item: FileItem) {
-        if FileSystemService.isReadableDirectory(item.url) {
-            tab.navigate(to: item.url)
-        } else {
-            NSWorkspace.shared.open(item.url)
-        }
-    }
-
-    // MARK: - Context menu
-
-    /// Tile-level menu — parallels CompactListView/GroupedListView so a
-    /// user right-clicking a tile in Icons mode gets the same options
-    /// as in the other view modes.
-    @ViewBuilder
-    private func tileContextMenu(for url: URL) -> some View {
-        Button("Open") {
-            if FileSystemService.isReadableDirectory(url) {
-                tab.navigate(to: url)
-            } else {
-                NSWorkspace.shared.open(url)
-            }
-        }
-        if !FileSystemService.isReadableDirectory(url) {
-            openWithMenu(for: url)
-        }
-        Divider()
-        Button("Cut") {
-            ensureSelection(includes: url)
-            ClipboardService.shared.cut(Array(tab.selectedIDs))
-        }
-        Button("Copy") {
-            ensureSelection(includes: url)
-            ClipboardService.shared.copy(Array(tab.selectedIDs))
-        }
-        Button("Paste") { tab.paste() }
-            .disabled(!ClipboardService.shared.hasContent)
-        Button("Copy Path") {
-            ensureSelection(includes: url)
-            ClipboardService.copyPathsToPasteboard(Array(tab.selectedIDs))
-        }
-        Divider()
-        Button("Rename") {
-            ensureSelection(includes: url)
-            tab.beginRenameSelected()
-        }
-        Button("Move to Trash") {
-            ensureSelection(includes: url)
-            tab.moveSelectedToTrash()
-        }
-        Divider()
-        if FileSystemService.isReadableDirectory(url) {
-            Button("Open in Terminal") { TerminalLauncher.open(url) }
-        }
-        Button("Show in Finder") {
-            ensureSelection(includes: url)
-            NSWorkspace.shared.activateFileViewerSelecting(Array(tab.selectedIDs))
-        }
-        Button("Share…") {
-            ensureSelection(includes: url)
-            ShareService.showPicker(for: Array(tab.selectedIDs))
-        }
-    }
-
-    private func ensureSelection(includes url: URL) {
-        if !tab.selectedIDs.contains(url) {
-            tab.selectedIDs = [url]
-        }
-    }
-
-    /// Read the live modifier flags at drop time so the caller can
-    /// pick the right `DropMode`. ⌥ held = always copy, ⌘ held =
-    /// always move; otherwise the same-volume default applies.
-    private func dropMode() -> TabViewModel.DropMode {
-        let mods = NSEvent.modifierFlags
-        if mods.contains(.option) { return .copy }
-        if mods.contains(.command) { return .move }
-        return .auto
-    }
-
-    @ViewBuilder
-    private func openWithMenu(for url: URL) -> some View {
-        Menu("Open With") {
-            let apps = AppLauncherService.applications(handlerFor: url)
-            ForEach(apps) { app in
-                Button {
-                    AppLauncherService.open([url], with: app.url)
-                } label: {
-                    Label {
-                        Text(app.isDefault ? "\(app.name) (default)" : app.name)
-                    } icon: {
-                        Image(nsImage: app.icon)
+            .contextMenu {
+                fileListBlankContextMenu(tab: tab) {
+                    Menu("View") {
+                        ForEach(FileViewMode.allCases) { mode in
+                            Button(mode.displayName) {
+                                NotificationCenter.default.post(
+                                    name: .feSetViewMode, object: nil,
+                                    userInfo: ["mode": mode.rawValue]
+                                )
+                            }
+                        }
                     }
                 }
             }
-            if !apps.isEmpty {
-                Divider()
-            }
-            Button("Other Application…") {
-                AppLauncherService.chooseApplication(for: [url])
-            }
+            // Pass the live tile frames so arrow keys navigate the grid
+            // in 2D (←→ columns, ↑↓ rows) instead of linear flow order.
+            .feKeyboardNavigation(tab: tab, gridFrames: itemFrames)
         }
     }
 }

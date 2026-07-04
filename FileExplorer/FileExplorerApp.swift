@@ -26,8 +26,14 @@ struct FileExplorerApp: App {
     // @AppStorage but is read from ContentView / FileListView instead.
 
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        // `for: URL.self` (rather than a plain `WindowGroup { ContentView() }`)
+        // lets tab tear-off (TabBar's "Move to New Window") open a window
+        // pre-seeded with one folder via `openWindow(value: url)`. The
+        // system's own "New Window" menu item still works exactly as
+        // before — it invokes this with `nil`, and `ContentView` restores
+        // the persisted session in that case, same as always.
+        WindowGroup(for: URL.self) { urlBinding in
+            ContentView(tornOffTabURL: urlBinding.wrappedValue)
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified(showsTitle: true))

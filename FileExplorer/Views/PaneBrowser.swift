@@ -73,6 +73,33 @@ struct PaneBrowser: View {
                 .background(.yellow.opacity(0.12))
                 Divider()
             }
+            // Transient success confirmation — the in-app fallback for
+            // `NotificationService.notifyOperationCompleted` when the
+            // user has denied (or never granted) notification
+            // permission, so a finished transfer isn't silently
+            // unconfirmed everywhere.
+            if let success = tab.successMessage {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Text(success)
+                        .font(.callout)
+                        .lineLimit(2)
+                    Spacer(minLength: 0)
+                    Button {
+                        tab.successMessage = nil
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Dismiss")
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(.green.opacity(0.12))
+                Divider()
+            }
             HSplitView {
                 FileListView(tab: tab)
                     .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)

@@ -411,7 +411,7 @@ struct DetailsTableView: View {
             // would need intersection logic that doesn't add real value.
             if selection.count == 1, let only = selection.first,
                !FileSystemService.isReadableDirectory(only) {
-                openWithMenu(for: only)
+                openWithFileMenu(for: only, tab: tab)
             }
             Divider()
             Button("Cut")  { clipboard.cut(Array(selection)) }
@@ -614,30 +614,6 @@ struct DetailsTableView: View {
                 } label: {
                     Label(mode.displayName, systemImage: mode.symbol)
                 }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func openWithMenu(for url: URL) -> some View {
-        Menu("Open With") {
-            let apps = AppLauncherService.applications(handlerFor: url)
-            ForEach(apps) { app in
-                Button {
-                    AppLauncherService.open([url], with: app.url)
-                } label: {
-                    Label {
-                        Text(app.isDefault ? "\(app.name) (default)" : app.name)
-                    } icon: {
-                        Image(nsImage: app.icon)
-                    }
-                }
-            }
-            if !apps.isEmpty {
-                Divider()
-            }
-            Button("Other Application…") {
-                AppLauncherService.chooseApplication(for: [url])
             }
         }
     }

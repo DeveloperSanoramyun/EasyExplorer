@@ -13,6 +13,10 @@
 //  ignores them naturally because we only report row frames, not
 //  header frames, to the preference key.
 //
+//  The lasso gesture, drop-mode/drop-into logic, and context menus are
+//  shared with CompactListView/IconsGridView via RowInteraction.swift —
+//  see that file for the shared implementations.
+//
 
 import SwiftUI
 import AppKit
@@ -23,23 +27,12 @@ struct GroupedListView: View {
     @AppStorage("fe.showExtensions") private var showExtensions: Bool = true
     @State private var collapsedBuckets: Set<String> = []
 
-    // Lasso state — see IconsGridView for the design notes.
+    // Lasso state — see RowInteraction.swift's `lassoSelectionGesture`.
     @State private var itemFrames: [URL: CGRect] = [:]
     @State private var lassoRect: CGRect? = nil
     @State private var baseSelection: Set<URL> = []
     @State private var lastAutoScroll: Date = .distantPast
     @State private var slowRename = SlowClickRename()
-
-    private func dropInto(_ folder: URL, _ dropped: [URL]) -> Bool {
-        guard FileSystemService.isReadableDirectory(folder) else { return false }
-        let sources = dropped.filter { $0 != folder && $0.deletingLastPathComponent() != folder }
-        guard !sources.isEmpty else { return false }
-        let mods = NSEvent.modifierFlags
-        let mode: TabViewModel.DropMode = mods.contains(.option) ? .copy
-            : mods.contains(.command) ? .move : .auto
-        tab.transferDropped(sources, to: folder, mode: mode)
-        return true
-    }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -52,14 +45,14 @@ struct GroupedListView: View {
                                     ForEach(group.items) { item in
                                         row(for: item)
                                             .id(item.url)
-                                            .background(frameReporter(for: item.url))
+                                            .background(lassoFrameReporter(for: item.url))
                                             // Multi-selection-aware drag
                                             // source — see beginRowDrag.
                                             .onDrag { beginRowDrag(item.url, tab: tab) }
                                             .folderDropTarget(
                                                 isFolder: FileSystemService.isReadableDirectory(item.url)
                                             ) { droppedURLs in
-                                                dropInto(item.url, droppedURLs)
+                                                fileListDropInto(item.url, dropped: droppedURLs, tab: tab)
                                             }
                                     }
                                 }
@@ -83,7 +76,18 @@ struct GroupedListView: View {
                     }
                 }
                 .coordinateSpace(name: "lasso")
-                .gesture(lassoGesture(proxy: proxy))
+                .gesture(
+                    lassoSelectionGesture(
+                        itemFrames: itemFrames,
+                        lassoRect: $lassoRect,
+                        baseSelection: $baseSelection,
+                        lastAutoScroll: $lastAutoScroll,
+                        flatItems: tab.groupedItems.flatMap(\.items),
+                        edgeZone: 30,
+                        tab: tab,
+                        proxy: proxy
+                    )
+                )
             }
             .background(.background)
             .onPreferenceChange(ItemFramePreferenceKey.self) { frames in
@@ -99,15 +103,17 @@ struct GroupedListView: View {
             .onChange(of: tab.renamingItemID) { _, _ in
                 slowRename.renameDidChange()
             }
-            .contextMenu { blankContextMenu }
+            .contextMenu {
+                fileListBlankContextMenu(tab: tab) {
+                    Menu("Group By") {
+                        ForEach(GroupKey.allCases) { key in
+                            Button(key.displayName) { tab.groupBy = key }
+                        }
+                    }
+                }
+            }
             .dropDestination(for: URL.self) { droppedURLs, _ in
-                let sources = droppedURLs.filter { $0.deletingLastPathComponent() != tab.currentURL }
-                guard !sources.isEmpty else { return false }
-                let mods = NSEvent.modifierFlags
-                let mode: TabViewModel.DropMode = mods.contains(.option) ? .copy
-                    : mods.contains(.command) ? .move : .auto
-                tab.transferDropped(sources, to: tab.currentURL, mode: mode)
-                return true
+                fileListDropIntoCurrentFolder(droppedURLs, tab: tab)
             }
             .contentShape(Rectangle())
             .onTapGesture { tab.selectedIDs.removeAll() }
@@ -206,7 +212,7 @@ struct GroupedListView: View {
         .onTapGesture(count: 2) {
             slowRename.noteOpened()
             slowRename.cancel()
-            openItem(item)
+            openFileListEntry(item.url, tab: tab)
         }
         .simultaneousGesture(
             TapGesture(count: 1).onEnded {
@@ -215,202 +221,7 @@ struct GroupedListView: View {
                               tab: tab, slowRename: slowRename)
             }
         )
-        .contextMenu { rowContextMenu(for: item.url) }
-    }
-
-    // MARK: - Open
-
-    private func openItem(_ item: FileItem) {
-        if FileSystemService.isReadableDirectory(item.url) {
-            tab.navigate(to: item.url)
-        } else {
-            NSWorkspace.shared.open(item.url)
-        }
-    }
-
-    // MARK: - Lasso plumbing
-
-    private func frameReporter(for url: URL) -> some View {
-        GeometryReader { proxy in
-            Color.clear.preference(
-                key: ItemFramePreferenceKey.self,
-                value: [url: proxy.frame(in: .named("lasso"))]
-            )
-        }
-    }
-
-    private func lassoGesture(proxy: ScrollViewProxy) -> some Gesture {
-        DragGesture(minimumDistance: 4, coordinateSpace: .named("lasso"))
-            .onChanged { value in
-                if lassoRect == nil {
-                    baseSelection = tab.selectedIDs
-                }
-                let rect = CGRect(
-                    x: min(value.startLocation.x, value.location.x),
-                    y: min(value.startLocation.y, value.location.y),
-                    width: abs(value.location.x - value.startLocation.x),
-                    height: abs(value.location.y - value.startLocation.y)
-                )
-                lassoRect = rect
-
-                var hits: Set<URL> = []
-                for (url, frame) in itemFrames where rect.intersects(frame) {
-                    hits.insert(url)
-                }
-                let mods = NSEvent.modifierFlags
-                if mods.contains(.command) {
-                    tab.selectedIDs = baseSelection.symmetricDifference(hits)
-                } else if mods.contains(.shift) {
-                    tab.selectedIDs = baseSelection.union(hits)
-                } else {
-                    tab.selectedIDs = hits
-                }
-                autoScrollIfNeeded(value: value, proxy: proxy)
-            }
-            .onEnded { _ in
-                lassoRect = nil
-                baseSelection = []
-            }
-    }
-
-    private func autoScrollIfNeeded(value: DragGesture.Value, proxy: ScrollViewProxy) {
-        guard !itemFrames.isEmpty,
-              Date().timeIntervalSince(lastAutoScroll) > 0.08 else { return }
-        let edgeZone: CGFloat = 30
-        let frames = itemFrames.values
-        guard let topY = frames.map(\.minY).min(),
-              let bottomY = frames.map(\.maxY).max() else { return }
-
-        let flat = tab.groupedItems.flatMap(\.items)
-        if value.location.y < topY + edgeZone {
-            if let topItem = itemFrames.min(by: { $0.value.minY < $1.value.minY })?.key,
-               let idx = flat.firstIndex(where: { $0.url == topItem }),
-               idx > 0 {
-                proxy.scrollTo(flat[max(0, idx - 3)].url, anchor: .top)
-                lastAutoScroll = Date()
-            }
-        } else if value.location.y > bottomY - edgeZone {
-            if let bottomItem = itemFrames.max(by: { $0.value.maxY < $1.value.maxY })?.key,
-               let idx = flat.firstIndex(where: { $0.url == bottomItem }),
-               idx < flat.count - 1 {
-                proxy.scrollTo(flat[min(flat.count - 1, idx + 3)].url, anchor: .bottom)
-                lastAutoScroll = Date()
-            }
-        }
-    }
-
-    // MARK: - Context menus
-
-    @ViewBuilder
-    private func rowContextMenu(for url: URL) -> some View {
-        Button("Open") {
-            if FileSystemService.isReadableDirectory(url) {
-                tab.navigate(to: url)
-            } else {
-                NSWorkspace.shared.open(url)
-            }
-        }
-        if !FileSystemService.isReadableDirectory(url) {
-            openWithMenu(for: url)
-        }
-        Divider()
-        Button("Cut") {
-            ensureSelection(includes: url)
-            ClipboardService.shared.cut(Array(tab.selectedIDs))
-        }
-        Button("Copy") {
-            ensureSelection(includes: url)
-            ClipboardService.shared.copy(Array(tab.selectedIDs))
-        }
-        Button("Paste") { tab.paste() }
-            .disabled(!ClipboardService.shared.hasContent)
-        Button("Copy Path") {
-            ensureSelection(includes: url)
-            ClipboardService.copyPathsToPasteboard(Array(tab.selectedIDs))
-        }
-        Divider()
-        Button("Rename") {
-            ensureSelection(includes: url)
-            tab.beginRenameSelected()
-        }
-        Button("Move to Trash") {
-            ensureSelection(includes: url)
-            tab.moveSelectedToTrash()
-        }
-        Divider()
-        Button("Show in Finder") {
-            ensureSelection(includes: url)
-            NSWorkspace.shared.activateFileViewerSelecting(Array(tab.selectedIDs))
-        }
-        Button("Share…") {
-            ensureSelection(includes: url)
-            ShareService.showPicker(for: Array(tab.selectedIDs))
-        }
-    }
-
-    @ViewBuilder
-    private var blankContextMenu: some View {
-        Menu("New") {
-            Button("Folder") { tab.createNewFolder() }
-            Button("Text File") {
-                tab.createNewFile(baseName: "New Text File", extension: "txt")
-            }
-        }
-        Divider()
-        Button("Paste") { tab.paste() }
-            .disabled(!ClipboardService.shared.hasContent)
-        Button("Copy Folder Path") {
-            ClipboardService.copyPathsToPasteboard([tab.currentURL])
-        }
-        Button("Open in Terminal") {
-            TerminalLauncher.open(tab.currentURL)
-        }
-        Button("Show in Finder") {
-            NSWorkspace.shared.activateFileViewerSelecting([tab.currentURL])
-        }
-        Divider()
-        Menu("Sort By") {
-            ForEach(FileItem.SortKey.allCases) { key in
-                Button(key.rawValue) { tab.setSort(key) }
-            }
-        }
-        Menu("Group By") {
-            ForEach(GroupKey.allCases) { key in
-                Button(key.displayName) { tab.groupBy = key }
-            }
-        }
-        Divider()
-        Button("Refresh") { tab.reload() }
-    }
-
-    private func ensureSelection(includes url: URL) {
-        if !tab.selectedIDs.contains(url) {
-            tab.selectedIDs = [url]
-        }
-    }
-
-    @ViewBuilder
-    private func openWithMenu(for url: URL) -> some View {
-        Menu("Open With") {
-            let apps = AppLauncherService.applications(handlerFor: url)
-            ForEach(apps) { app in
-                Button {
-                    AppLauncherService.open([url], with: app.url)
-                } label: {
-                    Label {
-                        Text(app.isDefault ? "\(app.name) (default)" : app.name)
-                    } icon: {
-                        Image(nsImage: app.icon)
-                    }
-                }
-            }
-            if !apps.isEmpty {
-                Divider()
-            }
-            Button("Other Application…") {
-                AppLauncherService.chooseApplication(for: [url])
-            }
-        }
+        .contextMenu { fileListRowContextMenu(for: item.url, tab: tab) }
     }
 
     // MARK: - Formatting

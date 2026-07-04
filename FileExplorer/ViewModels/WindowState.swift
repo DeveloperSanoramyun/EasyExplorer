@@ -137,6 +137,15 @@ final class WindowState: ObservableObject {
         }
     }
 
+    /// Used when a tab is torn off into a brand-new window (TabBar's
+    /// "Move to New Window", via `openWindow(value: url)`). Starts with
+    /// exactly that one tab — deliberately does NOT restore the
+    /// persisted session, which is only appropriate for the app's
+    /// original launch window.
+    init(singleTabAt url: URL) {
+        self.tabs = [TabViewModel(startAt: url)]
+    }
+
     // MARK: - Persistence
 
     /// Snapshot the current tab list (paths + active index) to

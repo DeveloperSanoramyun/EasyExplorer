@@ -64,9 +64,19 @@ struct ConflictDialog: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
             HStack(spacing: 6) {
-                Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
-                    .resizable()
-                    .frame(width: 28, height: 28)
+                // Real QuickLook thumbnail (not just the generic
+                // file-type icon) so two conflicting files with the same
+                // name — e.g. two different photo.jpg — are visually
+                // distinguishable. Falls back to the plain icon if the
+                // item vanished between the conflict firing and this
+                // dialog rendering.
+                if let item = FileItem.from(url: url) {
+                    ThumbnailIcon(item: item, sizeClass: .medium, pointSize: 28)
+                } else {
+                    Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
+                        .resizable()
+                        .frame(width: 28, height: 28)
+                }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(url.lastPathComponent)
                         .font(.callout)

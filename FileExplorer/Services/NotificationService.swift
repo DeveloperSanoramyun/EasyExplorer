@@ -24,21 +24,40 @@ enum NotificationService {
         }
     }
 
+    /// - Parameter tab: fallback target for the in-app success banner
+    ///   when the system notification can't actually be shown (permission
+    ///   denied, or never granted) — otherwise a completed multi-hour
+    ///   transfer produced no feedback anywhere.
+    @MainActor
     static func notifyOperationCompleted(
         title: String,
         body: String,
-        elapsed: TimeInterval
+        elapsed: TimeInterval,
+        tab: TabViewModel
     ) {
         guard elapsed >= minDuration else { return }
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        content.sound = .default
-        let req = UNNotificationRequest(
-            identifier: UUID().uuidString,
-            content: content,
-            trigger: nil   // deliver immediately
-        )
-        UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            // Only .authorized/.provisional will actually show anything —
+            // everything else (denied, not yet asked, ephemeral, or any
+            // future status) falls back to the in-app banner so the
+            // confirmation isn't silently lost.
+            guard settings.authorizationStatus == .authorized
+                    || settings.authorizationStatus == .provisional else {
+                Task { @MainActor in
+                    tab.reportSuccess("\(title) — \(body)")
+                }
+                return
+            }
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            content.sound = .default
+            let req = UNNotificationRequest(
+                identifier: UUID().uuidString,
+                content: content,
+                trigger: nil   // deliver immediately
+            )
+            UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
+        }
     }
 }

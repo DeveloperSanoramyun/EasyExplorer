@@ -3,10 +3,13 @@
 //  FileExplorer
 //
 //  Three Menu chips (Kind / Size / Date) that narrow the visible file
-//  list further than just the search query. Shown only while a search
-//  is active — collapses back to zero height the moment the user
-//  clears the search field, so it doesn't permanently consume chrome
-//  for a feature most folders won't need.
+//  list — independent of whether a search is active, since
+//  `TabViewModel.visibleItems` applies these to the plain folder
+//  listing too. Shown while searching, while a filter is set, or while
+//  the user has manually opened it via AddressBar's funnel button
+//  (`filterBarVisible`) — collapses back to zero height otherwise so it
+//  doesn't permanently consume chrome for a feature most folders won't
+//  need.
 //
 
 import SwiftUI
@@ -15,7 +18,7 @@ struct SearchFilterBar: View {
     @ObservedObject var tab: TabViewModel
 
     var body: some View {
-        if !tab.searchQuery.isEmpty {
+        if !tab.searchQuery.isEmpty || tab.hasActiveSearchFilter || tab.filterBarVisible {
             HStack(spacing: 6) {
                 Text("Filter:")
                     .font(.caption)

@@ -100,14 +100,29 @@ enum AppLauncherService {
     /// Open each URL with the picked application. Uses the modern
     /// configuration-based API so we can pass `activates = true` and
     /// avoid the deprecated openFile:withApplication: call.
-    static func open(_ urls: [URL], with app: URL) {
+    ///
+    /// Reports a launch failure (stale Launch Services registration for
+    /// an app that's since been deleted, Gatekeeper block, etc.) via
+    /// `tab.reportOpError` instead of silently doing nothing — this used
+    /// to discard the completion handler's error entirely, so a failed
+    /// "Open With" looked identical to a successful one that just didn't
+    /// visibly do anything.
+    static func open(_ urls: [URL], with app: URL, tab: TabViewModel) {
         let config = NSWorkspace.OpenConfiguration()
         config.activates = true
+        let appName = app.deletingPathExtension().lastPathComponent
         NSWorkspace.shared.open(
             urls,
             withApplicationAt: app,
             configuration: config
-        ) { _, _ in }
+        ) { _, error in
+            guard let error else { return }
+            // The completion handler isn't guaranteed to land on the
+            // main thread, but `tab` is @MainActor-isolated.
+            Task { @MainActor in
+                tab.reportOpError("Couldn't open with \(appName): \(error.localizedDescription)")
+            }
+        }
     }
 
     /// "Other Application…" — pops an NSOpenPanel rooted at
@@ -115,7 +130,7 @@ enum AppLauncherService {
     /// is the fallback when LaunchServices doesn't know about a
     /// particular file type, and it always appears so the Open With
     /// submenu has at least one entry.
-    static func chooseApplication(for urls: [URL]) {
+    static func chooseApplication(for urls: [URL], tab: TabViewModel) {
         let panel = NSOpenPanel()
         panel.title = "Choose Application"
         panel.message = "Pick an application to open \(urls.count == 1 ? urls[0].lastPathComponent : "\(urls.count) items") with."
@@ -125,7 +140,7 @@ enum AppLauncherService {
         panel.allowedContentTypes = [.applicationBundle]
         panel.directoryURL = URL(fileURLWithPath: "/Applications")
         if panel.runModal() == .OK, let appURL = panel.url {
-            open(urls, with: appURL)
+            open(urls, with: appURL, tab: tab)
         }
     }
 }

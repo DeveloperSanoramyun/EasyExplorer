@@ -10,8 +10,21 @@
 import SwiftUI
 
 struct ContentView: View {
-    @StateObject private var window = WindowState()
+    @StateObject private var window: WindowState
     @StateObject private var clipboard = ClipboardService.shared
+
+    /// `tornOffTabURL` non-nil means this window was just opened by
+    /// TabBar's "Move to New Window" (`openWindow(value: url)`) — start
+    /// with exactly that one tab instead of restoring the persisted
+    /// session, which is what a `nil` value (system "New Window" menu
+    /// item, or app launch) still does.
+    init(tornOffTabURL: URL? = nil) {
+        if let tornOffTabURL {
+            _window = StateObject(wrappedValue: WindowState(singleTabAt: tornOffTabURL))
+        } else {
+            _window = StateObject(wrappedValue: WindowState())
+        }
+    }
     /// Sidebar ideal width, persisted across launches. SwiftUI's
     /// NavigationSplitView doesn't expose a live width binding, so we
     /// observe the SidebarView's geometry and write here on change.
