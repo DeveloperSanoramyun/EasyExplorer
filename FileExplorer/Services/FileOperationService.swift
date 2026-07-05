@@ -10,6 +10,7 @@
 
 import Foundation
 import AppKit
+import SwiftUI   // NSHostingView for the conflict alert's comparison accessory
 
 // MARK: - Conflict resolution
 
@@ -48,6 +49,17 @@ enum ConflictPrompt {
                 alert.addButton(withTitle: "Cancel")     // 4th
                 alert.showsSuppressionButton = true
                 alert.suppressionButton?.title = "Apply to All"
+
+                // Side-by-side comparison (thumbnails + size/date/path)
+                // so same-named files are distinguishable — the alert's
+                // text alone can't tell two "photo.jpg" apart.
+                let comparison = NSHostingView(rootView: ConflictComparisonView(
+                    source: source, destination: destination))
+                comparison.frame = NSRect(
+                    x: 0, y: 0,
+                    width: 460,
+                    height: max(90, comparison.fittingSize.height))
+                alert.accessoryView = comparison
 
                 let response = alert.runModal()
                 let applyToAll = (alert.suppressionButton?.state == .on)

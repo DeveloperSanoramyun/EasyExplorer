@@ -312,10 +312,6 @@ final class TabViewModel: ObservableObject, Identifiable {
         }
     }
 
-    /// Holds the user's "Apply to all" choice within a single transfer
-    /// so a second conflict in the same batch reuses the prior answer.
-    private var batchBlanketDecision: ConflictDecision? = nil
-
     // MARK: History
 
     private var back: [URL] = []
@@ -401,6 +397,9 @@ final class TabViewModel: ObservableObject, Identifiable {
         // down cleanly. (Each folder starts query-less — Windows-style.)
         searchQuery = ""
         searchScope = .folder
+        // Filter chips are per-location too (see resetSearchForNavigation).
+        if hasActiveSearchFilter { resetSearchFilters() }
+        filterBarVisible = false
         applyFolderSort()
         reload()
         startWatching()     // re-aim FSEvents at the new directory
@@ -464,6 +463,12 @@ final class TabViewModel: ObservableObject, Identifiable {
     /// Guarded so we don't churn `searchQueryChanged()` when no search
     /// is active.
     private func resetSearchForNavigation() {
+        // Kind/size/date chips are per-location, like Finder/Explorer —
+        // a "Images only" filter set in Downloads shouldn't silently
+        // hide files in the next folder. Collapse the manually-opened
+        // bar too so the next folder starts clean.
+        if hasActiveSearchFilter { resetSearchFilters() }
+        filterBarVisible = false
         guard !searchQuery.isEmpty || searchScope != .folder else { return }
         // Clear the query BEFORE the scope (matching `navigate`) — the
         // reverse order briefly fires a Spotlight query for the old text
@@ -503,7 +508,7 @@ final class TabViewModel: ObservableObject, Identifiable {
             // Invalidate cached folder sizes for items that no longer
             // exist. Other entries stay cached — the user paid for
             // them once and the underlying tree may not have changed.
-            FolderSizeService.shared.invalidateMissing(from: liveIDs)
+            FolderSizeService.shared.invalidateMissing(from: liveIDs, in: currentURL)
             // Stop inline audio preview if the playing track just
             // vanished from the listing (trashed / deleted / moved) —
             // otherwise it keeps playing for a file that's no longer
@@ -1282,7 +1287,6 @@ final class TabViewModel: ObservableObject, Identifiable {
     func dismissTransferDialog() {
         transferProgress = nil
         transferDialogVisible = false
-        batchBlanketDecision = nil
     }
 
     // MARK: Batch rename

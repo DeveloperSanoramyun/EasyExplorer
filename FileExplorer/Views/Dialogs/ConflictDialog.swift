@@ -2,58 +2,33 @@
 //  ConflictDialog.swift
 //  FileExplorer
 //
-//  Shown when a copy/move target already exists. Lets the user choose
-//  Skip / Replace / Keep both, optionally "apply to all" for the rest
-//  of the batch — same shape as Windows Explorer's collision dialog.
+//  Source-vs-destination comparison shown INSIDE the conflict NSAlert
+//  (ConflictPrompt in FileOperationService) via an NSHostingView
+//  accessory. The alert has to be an NSAlert — a SwiftUI sheet can't
+//  present over the already-presented transfer-progress sheet — but a
+//  bare alert only showed the file NAME, which is useless when both
+//  sides are "photo.jpg". This view adds real QuickLook thumbnails plus
+//  size / modification date / location so the user can tell the two
+//  apart before choosing Replace / Keep Both / Skip.
+//
+//  (An earlier standalone `ConflictDialog` SwiftUI sheet lived here; it
+//  was never presented once the NSAlert flow landed, so it's gone.)
 //
 
 import SwiftUI
+import AppKit
 
-struct ConflictDialog: View {
+struct ConflictComparisonView: View {
     let source: URL
     let destination: URL
-    /// Caller-supplied callback. Receives (decision, applyToAll).
-    let onResolve: (ConflictDecision, Bool) -> Void
-
-    @State private var applyToAll: Bool = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 10) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .feFont(size: 26)
-                    .foregroundStyle(.orange)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("An item named \u{201C}\(source.lastPathComponent)\u{201D} already exists.")
-                        .font(.headline)
-                    Text("Choose how to handle the conflict.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
-
-            // Source vs destination quick comparison
-            HStack(alignment: .top, spacing: 12) {
-                fileBox(title: "Source", url: source)
-                fileBox(title: "Destination", url: destination)
-            }
-
-            Toggle("Apply this answer to all remaining conflicts", isOn: $applyToAll)
-                .font(.callout)
-
-            HStack {
-                Button("Cancel All") { onResolve(.cancel, false) }
-                    .keyboardShortcut(.cancelAction)
-                Spacer()
-                Button("Skip") { onResolve(.skip, applyToAll) }
-                Button("Keep Both") { onResolve(.keepBoth, applyToAll) }
-                Button("Replace") { onResolve(.replace, applyToAll) }
-                    .keyboardShortcut(.defaultAction)
-            }
+        HStack(alignment: .top, spacing: 12) {
+            fileBox(title: "Source", url: source)
+            fileBox(title: "Existing", url: destination)
         }
-        .padding(20)
-        .frame(width: 520)
+        .padding(.top, 4)
+        .frame(width: 460)
     }
 
     @ViewBuilder
@@ -64,12 +39,11 @@ struct ConflictDialog: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
             HStack(spacing: 6) {
-                // Real QuickLook thumbnail (not just the generic
-                // file-type icon) so two conflicting files with the same
-                // name — e.g. two different photo.jpg — are visually
-                // distinguishable. Falls back to the plain icon if the
+                // Real QuickLook thumbnail (not the generic file-type
+                // icon) so two same-named files are visually
+                // distinguishable. Falls back to the plain icon when the
                 // item vanished between the conflict firing and this
-                // dialog rendering.
+                // rendering.
                 if let item = FileItem.from(url: url) {
                     ThumbnailIcon(item: item, sizeClass: .medium, pointSize: 28)
                 } else {
@@ -107,6 +81,6 @@ struct ConflictDialog: View {
         if let mod = values?.contentModificationDate {
             parts.append(FileFormatters.short(mod))
         }
-        return parts.joined(separator: " · ")
+        return parts.isEmpty ? "—" : parts.joined(separator: " · ")
     }
 }

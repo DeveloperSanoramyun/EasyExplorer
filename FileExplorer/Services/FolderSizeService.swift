@@ -31,11 +31,18 @@ final class FolderSizeService: ObservableObject {
         sizes.removeAll()
     }
 
-    /// Drop cached sizes whose folders no longer appear in `currentURLs`.
-    /// Called from TabViewModel.reload() so a folder that was renamed or
-    /// trashed externally doesn't keep a stale row size around.
-    func invalidateMissing(from currentURLs: Set<URL>) {
-        let stale = sizes.keys.filter { !currentURLs.contains($0) }
+    /// Drop cached sizes for CHILDREN of `parent` that no longer appear
+    /// in `currentURLs` — i.e. folders renamed or trashed externally.
+    /// Called from TabViewModel.reload().
+    ///
+    /// Scoped to `parent`'s direct children on purpose: the previous
+    /// version removed EVERY key not in the current listing, so merely
+    /// navigating from folder A to folder B wiped all of A's calculated
+    /// sizes — "Calculate Size" results never survived a revisit.
+    func invalidateMissing(from currentURLs: Set<URL>, in parent: URL) {
+        let stale = sizes.keys.filter {
+            $0.deletingLastPathComponent() == parent && !currentURLs.contains($0)
+        }
         for url in stale {
             sizes.removeValue(forKey: url)
         }

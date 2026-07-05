@@ -128,7 +128,7 @@ struct DetailsTableView: View {
             .width(min: 160, ideal: 320)
             .customizationID("name")
 
-            TableColumn("Date Modified", value: \FileItem.dateSortableString) { item in
+            TableColumn("Date Modified", value: \FileItem.dateModifiedSortKey) { item in
                 Text(formatDate(item.dateModified))
                     .feFont(size: 13)
                     .foregroundStyle(.secondary)
@@ -161,7 +161,7 @@ struct DetailsTableView: View {
             // context menu). Keeping them in the builder means
             // TableColumnCustomization can offer them in its menu.
 
-            TableColumn("Date Created", value: \FileItem.dateCreatedSortableString) { item in
+            TableColumn("Date Created", value: \FileItem.dateCreatedSortKey) { item in
                 Text(formatDate(item.dateCreated))
                     .feFont(size: 13)
                     .foregroundStyle(.secondary)
@@ -170,7 +170,7 @@ struct DetailsTableView: View {
             .width(min: 130, ideal: 170)
             .customizationID("dateCreated")
 
-            TableColumn("Date Accessed", value: \FileItem.dateAccessedSortableString) { item in
+            TableColumn("Date Accessed", value: \FileItem.dateAccessedSortKey) { item in
                 Text(formatDate(item.dateAccessed))
                     .feFont(size: 13)
                     .foregroundStyle(.secondary)
@@ -636,11 +636,11 @@ struct DetailsTableView: View {
                 case .typeLabel:
                     comparator = KeyPathComparator(\FileItem.typeLabel, order: order)
                 case .dateLastOpened:
-                    comparator = KeyPathComparator(\FileItem.dateAccessedSortableString, order: order)
+                    comparator = KeyPathComparator(\FileItem.dateAccessedSortKey, order: order)
                 case .dateModified:
-                    comparator = KeyPathComparator(\FileItem.dateSortableString, order: order)
+                    comparator = KeyPathComparator(\FileItem.dateModifiedSortKey, order: order)
                 case .dateCreated:
-                    comparator = KeyPathComparator(\FileItem.dateCreatedSortableString, order: order)
+                    comparator = KeyPathComparator(\FileItem.dateCreatedSortKey, order: order)
                 case .size:
                     comparator = KeyPathComparator(\FileItem.sizeSortableInt, order: order)
                 case .tags:
@@ -653,9 +653,9 @@ struct DetailsTableView: View {
                 let ascending = (comp.order == .forward)
                 if comp.keyPath == \FileItem.name { tab.sortKey = .name }
                 else if comp.keyPath == \FileItem.typeLabel { tab.sortKey = .typeLabel }
-                else if comp.keyPath == \FileItem.dateAccessedSortableString { tab.sortKey = .dateLastOpened }
-                else if comp.keyPath == \FileItem.dateSortableString { tab.sortKey = .dateModified }
-                else if comp.keyPath == \FileItem.dateCreatedSortableString { tab.sortKey = .dateCreated }
+                else if comp.keyPath == \FileItem.dateAccessedSortKey { tab.sortKey = .dateLastOpened }
+                else if comp.keyPath == \FileItem.dateModifiedSortKey { tab.sortKey = .dateModified }
+                else if comp.keyPath == \FileItem.dateCreatedSortKey { tab.sortKey = .dateCreated }
                 else if comp.keyPath == \FileItem.sizeSortableInt { tab.sortKey = .size }
                 else if comp.keyPath == \FileItem.tagsSortable { tab.sortKey = .tags }
                 tab.sortAscending = ascending
@@ -717,22 +717,22 @@ struct DetailsTableView: View {
 // MARK: - Sortable derived strings/ints
 
 extension FileItem {
-    var dateSortableString: String {
-        guard let d = dateModified else { return "" }
-        let f = ISO8601DateFormatter()
-        return f.string(from: d)
+    // Raw time intervals (not formatted strings) as the date columns'
+    // sort keys. The previous ISO8601DateFormatter-per-access version
+    // allocated a fresh formatter for EVERY comparison — tens of
+    // thousands of allocations per header click on a large folder.
+    // Missing dates sort as -1 (before every real date), matching the
+    // old ""-sorts-first behaviour.
+    var dateModifiedSortKey: TimeInterval {
+        dateModified?.timeIntervalSince1970 ?? -1
     }
 
-    var dateCreatedSortableString: String {
-        guard let d = dateCreated else { return "" }
-        let f = ISO8601DateFormatter()
-        return f.string(from: d)
+    var dateCreatedSortKey: TimeInterval {
+        dateCreated?.timeIntervalSince1970 ?? -1
     }
 
-    var dateAccessedSortableString: String {
-        guard let d = dateAccessed else { return "" }
-        let f = ISO8601DateFormatter()
-        return f.string(from: d)
+    var dateAccessedSortKey: TimeInterval {
+        dateAccessed?.timeIntervalSince1970 ?? -1
     }
 
     var sizeSortableInt: Int64 {

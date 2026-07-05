@@ -95,6 +95,11 @@ struct GroupedListView: View {
             }
             .onChange(of: tab.currentURL) { _, _ in
                 itemFrames.removeAll()
+                // Collapsed-section state is per-folder: bucket names
+                // ("Images", "Today"…) repeat across folders, so a
+                // bucket collapsed in folder A would otherwise arrive
+                // pre-collapsed in folder B.
+                collapsedBuckets.removeAll()
             }
             // Feed the slow-click rename detector — see RowInteraction.
             .onChange(of: tab.selectedIDs) { _, newValue in

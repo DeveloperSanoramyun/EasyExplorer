@@ -27,22 +27,25 @@ final class TrashLocationCache: ObservableObject {
     /// Returns the cached parent URL, or nil if not yet fetched.
     func parent(of url: URL) -> URL? { locations[url] }
 
-    /// Spin up a background task that asks Finder for the original
-    /// location of each URL not already in the cache. AppleScript is
-    /// invoked from a detached Task so the file list doesn't stall.
+    /// Ask Finder for the original location of each URL not already in
+    /// the cache. Runs on the MAIN actor — NSAppleScript (OSA/Apple
+    /// Events) is not thread-safe and crashes nondeterministically off
+    /// the main thread, which is where the previous `Task.detached`
+    /// version put it. `Task.yield()` between items keeps the run loop
+    /// breathing so a Trash full of files doesn't freeze the UI for the
+    /// whole batch; per-item Finder round-trip jank is the price of
+    /// correctness here. The lookups are lazy per visible row (and the
+    /// column is hidden by default), so batches stay small in practice.
     func prefetch(_ urls: [URL]) {
         let toFetch = urls.filter { locations[$0] == nil && !pending.contains($0) }
         guard !toFetch.isEmpty else { return }
         pending.formUnion(toFetch)
-        Task.detached(priority: .utility) {
-            let results = toFetch.map { url -> (URL, URL?) in
-                (url, TrashService.originalLocation(of: url))
-            }
-            await MainActor.run {
-                for (url, parent) in results {
-                    if let p = parent { TrashLocationCache.shared.locations[url] = p }
-                    TrashLocationCache.shared.pending.remove(url)
-                }
+        Task { @MainActor in
+            for url in toFetch {
+                let parent = TrashService.originalLocation(of: url)
+                if let parent { locations[url] = parent }
+                pending.remove(url)
+                await Task.yield()
             }
         }
     }

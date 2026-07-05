@@ -41,10 +41,6 @@ struct ContentView: View {
     /// subsequent launches (or rebuilds — same bundle id) don't keep
     /// popping the sheet.
     @AppStorage("fe.hasShownPermissionGuide") private var hasShownPermissionGuide: Bool = false
-    /// Single-fire guard so re-runs of `.onAppear` (which SwiftUI can
-    /// invoke after layout shuffles) don't pile up duplicate
-    /// NotificationCenter observers for the willTerminate hook.
-    @State private var registeredTerminationObserver = false
     /// Drives the ⌘\ sidebar toggle. `.automatic` shows the sidebar on
     /// macOS; switching to `.detailOnly` hides it. The notification
     /// handler in `splitView` flips between the two.
@@ -141,19 +137,12 @@ struct ContentView: View {
                     showPermissionGuide = true
                 }
             }
+            // The quit-time session save lives in WindowState itself now
+            // (weak, removed in deinit) — the observer that used to be
+            // registered here strongly captured the WindowState forever,
+            // keeping closed windows' tabs and FSEvents watchers alive.
             .onAppear {
                 activeTabCount = window.tabs.count
-                guard !registeredTerminationObserver else { return }
-                registeredTerminationObserver = true
-                // Final save when the app is about to quit — picks up
-                // any URL navigation that happened since the last tab
-                // list change.
-                NotificationCenter.default.addObserver(
-                    forName: NSApplication.willTerminateNotification,
-                    object: nil, queue: .main
-                ) { [window] _ in
-                    Task { @MainActor in window.persistSession() }
-                }
             }
             .onChange(of: window.tabs.count) { _, newCount in
                 activeTabCount = newCount

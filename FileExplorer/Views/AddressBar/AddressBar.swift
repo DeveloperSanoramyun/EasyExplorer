@@ -11,6 +11,15 @@ import SwiftUI
 
 struct AddressBar: View {
     @ObservedObject var tab: TabViewModel
+    /// False for the inactive pane in split view. The ⌘L/⌘F/⌘⇧F focus
+    /// notifications below are app-wide broadcasts — without this gate
+    /// (plus the key-window check) BOTH panes of a split view and every
+    /// open window flipped into edit/search mode at once.
+    var isActivePane: Bool = true
+
+    /// Host window, resolved by the probe in `body` — used to ignore
+    /// focus broadcasts aimed at some other window.
+    @State private var hostWindow: NSWindow?
 
     /// Edit-mode state lives here so toggling between breadcrumb and
     /// TextField is local. The path string is initialised every time we
@@ -54,10 +63,27 @@ struct AddressBar: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(.bar)
+        .background(AddressBarWindowProbe { w in
+            // Dedupe — the probe re-fires on every render; writing the
+            // same window back into @State would re-render forever.
+            if hostWindow !== w { hostWindow = w }
+        })
         // ⌘L = jump to address bar (Windows: Ctrl+L / Alt+D / F4)
         .onReceive(NotificationCenter.default.publisher(for: .feFocusAddressBar)) { _ in
+            guard shouldHandleFocusCommand else { return }
             beginEditing()
         }
+    }
+
+    /// True when a broadcast focus command (⌘L / ⌘F / ⌘⇧F) is meant for
+    /// THIS address bar: its pane is the active one and its window is
+    /// frontmost. `hostWindow == nil` (probe not yet resolved) falls
+    /// back to accepting, so a lone window keeps working at launch —
+    /// same convention as `WindowState.isCommandTarget`.
+    private var shouldHandleFocusCommand: Bool {
+        guard isActivePane else { return false }
+        guard let w = hostWindow else { return true }
+        return w.isKeyWindow || w.isMainWindow
     }
 
     // MARK: - Search (inline in the AddressBar row)
@@ -114,10 +140,12 @@ struct AddressBar: View {
                         ? Color.accentColor.opacity(0.6) : .clear, lineWidth: 1)
         )
         .onReceive(NotificationCenter.default.publisher(for: .feFocusSearchGlobal)) { _ in
+            guard shouldHandleFocusCommand else { return }
             tab.switchToGlobalSearch()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
         }
         .onReceive(NotificationCenter.default.publisher(for: .feFocusSearchFolder)) { _ in
+            guard shouldHandleFocusCommand else { return }
             if tab.searchScope != .folder { tab.searchScope = .folder }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
         }
@@ -615,6 +643,30 @@ private struct BreadcrumbSegment {
     let displayName: String
     let url: URL
     let isRootShortcut: Bool
+}
+
+/// Resolves the NSWindow hosting this AddressBar so the focus-command
+/// gate can tell whether a ⌘L/⌘F broadcast is aimed at this window.
+/// (Same pattern as ContentView's WindowAccessor, which is private
+/// there.)
+private struct AddressBarWindowProbe: NSViewRepresentable {
+    let onResolve: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        // `view.window` is nil until the view joins the hierarchy —
+        // defer one hop so it's attached.
+        DispatchQueue.main.async { onResolve(v.window) }
+        return v
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        // Always defer: `onResolve` writes into the caller's @State, and
+        // doing that synchronously here would be a state mutation during
+        // a view update. The caller dedupes identical values so this
+        // doesn't cause a render loop.
+        DispatchQueue.main.async { [weak nsView] in onResolve(nsView?.window) }
+    }
 }
 
 // MARK: - Notification names (cross-view command bus)

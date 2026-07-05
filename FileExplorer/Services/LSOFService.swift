@@ -75,11 +75,4 @@ enum LSOFService {
         return holders
     }
 
-    /// Friendly one-line summary — "Photos (uid 501, pid 1234)" —
-    /// suitable for an error dialog or detail row.
-    static func summary(for url: URL) -> String? {
-        let list = holders(of: url)
-        guard !list.isEmpty else { return nil }
-        return list.prefix(3).map { "\($0.command) (pid \($0.pid))" }.joined(separator: ", ")
-    }
 }

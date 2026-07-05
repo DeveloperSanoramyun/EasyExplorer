@@ -120,7 +120,27 @@ final class WindowState: ObservableObject {
         let activeIndex: Int
     }
 
+    /// True for the window that RESTORED the persisted session (the
+    /// app's main launch window). Only this window writes the session
+    /// back — every window used to write the same UserDefaults key, so
+    /// the moment a tab was torn off into its own window, that window's
+    /// one-tab "session" clobbered the main window's tab list and the
+    /// next launch came up missing tabs. Torn-off windows are ephemeral
+    /// by design: macOS state restoration brings them back (with their
+    /// URL) if they were open at quit, so they don't need — and must
+    /// not touch — the session key.
+    let isSessionOwner: Bool
+
+    /// willTerminate observer token. Registered here (not in
+    /// ContentView, which used to strongly capture the WindowState in a
+    /// never-removed NotificationCenter block — every closed window's
+    /// whole tab graph, FSEvents watchers included, stayed alive and
+    /// kept reloading invisible folders until quit). Weakly captured +
+    /// removed in deinit, so a closed window's state can actually die.
+    private var terminationObserver: NSObjectProtocol?
+
     init() {
+        self.isSessionOwner = true
         // Try to bring back the last session's tabs. Each path is
         // validated against the live file system so a folder that was
         // moved/deleted while the app was quit just falls out of the
@@ -135,15 +155,38 @@ final class WindowState: ObservableObject {
            savedIndex >= 0, savedIndex < tabs.count {
             self.activeIndex = savedIndex
         }
+        registerTerminationHook()
     }
 
     /// Used when a tab is torn off into a brand-new window (TabBar's
     /// "Move to New Window", via `openWindow(value: url)`). Starts with
     /// exactly that one tab — deliberately does NOT restore the
-    /// persisted session, which is only appropriate for the app's
-    /// original launch window.
+    /// persisted session, and never writes it either (`isSessionOwner`).
     init(singleTabAt url: URL) {
+        self.isSessionOwner = false
         self.tabs = [TabViewModel(startAt: url)]
+    }
+
+    deinit {
+        if let token = terminationObserver {
+            NotificationCenter.default.removeObserver(token)
+        }
+    }
+
+    /// Final session save when the app quits — catches URL navigation
+    /// that happened after the last tabs/activeIndex change (which are
+    /// the only other persist triggers).
+    private func registerTerminationHook() {
+        terminationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            // willTerminate arrives on the main thread; WindowState is
+            // MainActor-bound, so this is the same isolation domain.
+            MainActor.assumeIsolated {
+                self?.persistSession()
+            }
+        }
     }
 
     // MARK: - Persistence
@@ -151,7 +194,9 @@ final class WindowState: ObservableObject {
     /// Snapshot the current tab list (paths + active index) to
     /// UserDefaults. Called when tabs change and again on app quit so
     /// the next launch comes up exactly where the user left off.
+    /// No-op for torn-off windows — see `isSessionOwner`.
     func persistSession() {
+        guard isSessionOwner else { return }
         let session = PersistedSession(
             paths: tabs.map { $0.currentURL.path },
             activeIndex: activeIndex

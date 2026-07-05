@@ -73,7 +73,36 @@ final class FolderNode: ObservableObject, Identifiable, Hashable {
     }
 
     func toggleExpanded() {
-        if !isExpanded { loadChildrenIfNeeded() }
+        if !isExpanded {
+            if children == nil {
+                loadChildrenIfNeeded()
+            } else {
+                // Re-expanding: refresh in the background so folders
+                // created/deleted since the last load show up — the old
+                // `children == nil` guard meant the tree NEVER updated
+                // after the first expansion short of an app restart.
+                // The stale list stays visible while the fresh one
+                // loads (no spinner flash); existing FolderNode
+                // instances are reused by URL so grandchild expansion
+                // state survives the refresh.
+                refreshChildren()
+            }
+        }
         isExpanded.toggle()
+    }
+
+    private func refreshChildren() {
+        guard !isLoading else { return }
+        let targetURL = url
+        Task {
+            let listed = await Self.listSubdirectoriesOffMain(targetURL)
+            await MainActor.run {
+                let existing = Dictionary(uniqueKeysWithValues:
+                    (self.children ?? []).map { ($0.url, $0) })
+                self.children = listed.map {
+                    existing[$0.url] ?? FolderNode(url: $0.url, displayName: $0.name)
+                }
+            }
+        }
     }
 }

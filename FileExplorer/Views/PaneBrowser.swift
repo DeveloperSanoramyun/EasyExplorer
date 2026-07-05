@@ -43,7 +43,7 @@ struct PaneBrowser: View {
                     .fill(isActive ? Color.accentColor : Color.clear)
                     .frame(height: 2)
             }
-            AddressBar(tab: tab)
+            AddressBar(tab: tab, isActivePane: isActive)
             // Filter chip row collapses itself when no search is active.
             SearchFilterBar(tab: tab)
             Divider()
