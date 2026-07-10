@@ -19,10 +19,21 @@ struct FileListView: View {
     var body: some View {
         let mode = effectiveMode
         Group {
-            // Grouping overrides the chosen view mode — Windows Explorer
-            // does the same. To go back to icons/list/details the user
-            // picks "Group by → None".
-            if tab.groupBy != .none {
+            // Zero visible items → show ONLY the overlay, not an empty
+            // list view underneath. SwiftUI's `Table` (Details mode)
+            // still painted its native alternating-row-background
+            // striping for several phantom rows even with a genuinely
+            // empty `rows: { ForEach(tab.visibleItems) {...} }` — a
+            // zero-result search looked like a half-broken blank list
+            // instead of a clear "No Matches" message. Icons/Compact/
+            // Grouped don't have this quirk, but skipping them too
+            // keeps the empty state visually consistent across modes.
+            if tab.visibleItems.isEmpty {
+                Color.clear
+            } else if tab.groupBy != .none {
+                // Grouping overrides the chosen view mode — Windows
+                // Explorer does the same. To go back to icons/list/
+                // details the user picks "Group by → None".
                 GroupedListView(tab: tab)
             } else {
                 switch mode {
@@ -71,12 +82,30 @@ struct FileListView: View {
                 systemImage: "exclamationmark.triangle",
                 description: Text(err)
             )
-        } else if tab.items.isEmpty {
-            ContentUnavailableView(
-                "Empty folder",
-                systemImage: "folder",
-                description: Text("This folder has no items.")
-            )
+        } else if tab.visibleItems.isEmpty {
+            // `visibleItems` (search + kind/size/date filters applied),
+            // NOT the raw `items` — a zero-result SEARCH on a non-empty
+            // folder used to fail this check (the folder itself wasn't
+            // empty), so this overlay never appeared and the Table
+            // underneath rendered with zero real rows but its native
+            // alternating-row-background striping still visible — a
+            // confusing "half-broken" blank list instead of a clear
+            // "No matches" message.
+            if tab.searchQuery.isEmpty && !tab.hasActiveSearchFilter {
+                ContentUnavailableView(
+                    "Empty folder",
+                    systemImage: "folder",
+                    description: Text("This folder has no items.")
+                )
+            } else {
+                ContentUnavailableView(
+                    "No Matches",
+                    systemImage: "magnifyingglass",
+                    description: tab.searchQuery.isEmpty
+                        ? Text("No items match the active filter.")
+                        : Text("No items match \u{201C}\(tab.searchQuery)\u{201D}.")
+                )
+            }
         }
     }
 }

@@ -552,11 +552,20 @@ private struct StatusBar: View {
     /// "23 items (5 folders, 18 files)" — folder/file split is what
     /// every modern file manager shows. Falls back to the plain count
     /// for very small folders where the split is uninteresting.
+    ///
+    /// Reads `visibleItems` (search + kind/size/date filters applied),
+    /// NOT the raw `items` — the bar used to always show the folder's
+    /// total count regardless of an active search, which read as "the
+    /// search isn't doing anything" even when the list itself was
+    /// filtering correctly.
     private var itemSummary: String {
-        let total = tab.items.count
-        let folders = tab.items.filter { $0.isDirectory && !$0.isPackage }.count
+        let visible = tab.visibleItems
+        let total = visible.count
+        let folders = visible.filter { $0.isDirectory && !$0.isPackage }.count
         let files = total - folders
-        if total == 0 { return "Empty folder" }
+        if total == 0 {
+            return tab.searchQuery.isEmpty ? "Empty folder" : "No matches"
+        }
         if folders == 0 || files == 0 {
             // Pure folder or pure file directory.
             return "\(total) item\(total == 1 ? "" : "s")"
@@ -566,7 +575,10 @@ private struct StatusBar: View {
 
     private var selectionSummary: String {
         let count = tab.selectedIDs.count
-        let totalBytes = tab.items
+        // Same fix as `itemSummary` — a selected search result from
+        // outside the current folder isn't in `tab.items`, so the old
+        // lookup silently dropped its size from the total.
+        let totalBytes = tab.visibleItems
             .filter { tab.selectedIDs.contains($0.url) }
             .compactMap { $0.size }
             .reduce(Int64(0), +)
