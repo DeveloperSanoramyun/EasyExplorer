@@ -277,13 +277,23 @@ enum FileOperationService {
     /// Copy or move a batch with progress reporting and conflict prompts.
     /// Runs on a detached task. Caller observes `progress` on the main thread.
     /// `move == true` deletes the source after a successful copy.
+    ///
+    /// Returns the (source, actual-destination) pairs for items that
+    /// transferred WITHOUT overwriting anything — i.e. everything except
+    /// a "Replace" conflict resolution. Callers use this to build Undo:
+    /// a plain copy/move/keep-both is safely reversible (delete the copy,
+    /// or move the moved item back); a Replace isn't, without ALSO
+    /// restoring whatever it overwrote, which this doesn't attempt — an
+    /// undone batch that included a Replace just leaves those items
+    /// alone rather than pretending to reverse something it can't.
+    @discardableResult
     static func transfer(
         _ sources: [URL],
         to destinationFolder: URL,
         move: Bool,
         progress: FileOperationProgress,
         resolver: @escaping ConflictResolver
-    ) async {
+    ) async -> [(source: URL, destination: URL)] {
         await MainActor.run {
             progress.reset()
             progress.total = sources.count
@@ -293,6 +303,7 @@ enum FileOperationService {
         // Accumulate per-item failures so a multi-file batch reports
         // EVERY failure, not just the last one to write `errorMessage`.
         var errors: [String] = []
+        var transferred: [(source: URL, destination: URL)] = []
 
         // Labelled so `.cancel` in the inner switch can abort the whole
         // batch — a bare `break` only escapes the switch and falls through
@@ -303,6 +314,9 @@ enum FileOperationService {
             await MainActor.run { progress.currentFileName = source.lastPathComponent }
 
             var destination = destinationFolder.appendingPathComponent(source.lastPathComponent)
+            // Set in the `.replace` branch below — excludes this item
+            // from the returned (undoable) pairs. See the doc comment.
+            var wasReplace = false
 
             // Bail on placing a folder inside itself (or into one of its
             // own descendants). Move would create an infinite loop on
@@ -348,6 +362,7 @@ enum FileOperationService {
                         await MainActor.run { progress.processed += 1 }
                         continue
                     }
+                    wasReplace = true
                 case .keepBoth:
                     destination = uniquify(destination)
                 }
@@ -358,6 +373,9 @@ enum FileOperationService {
                     try FileManager.default.moveItem(at: source, to: destination)
                 } else {
                     try FileManager.default.copyItem(at: source, to: destination)
+                }
+                if !wasReplace {
+                    transferred.append((source: source, destination: destination))
                 }
             } catch {
                 errors.append("\(source.lastPathComponent): \(error.localizedDescription)")
@@ -383,6 +401,7 @@ enum FileOperationService {
             }
             progress.isDone = true
         }
+        return transferred
     }
 
     // MARK: Helpers

@@ -1261,7 +1261,7 @@ final class TabViewModel: ObservableObject, Identifiable {
         let count = urls.count
         let verb = move ? "moved" : "copied"
         Task.detached(priority: .userInitiated) {
-            await FileOperationService.transfer(
+            let pairs = await FileOperationService.transfer(
                 urls,
                 to: destination,
                 move: move,
@@ -1274,6 +1274,7 @@ final class TabViewModel: ObservableObject, Identifiable {
                 if move { ClipboardService.shared.clear() }
                 self.reload()
                 self.finishTransferSheet(progress)
+                self.recordTransferUndo(pairs, move: move)
                 NotificationService.notifyOperationCompleted(
                     title: "\(verb.capitalized) \(count) item\(count == 1 ? "" : "s")",
                     body: destination.lastPathComponent,
@@ -1287,6 +1288,57 @@ final class TabViewModel: ObservableObject, Identifiable {
     func dismissTransferDialog() {
         transferProgress = nil
         transferDialogVisible = false
+    }
+
+    /// Shared Undo/Redo wiring for `paste()` and `transferDropped()`.
+    /// `pairs` are the (source, actual-destination) results FileOperation-
+    /// Service.transfer reports — actual because "Keep Both" conflicts
+    /// resolve to a uniquified path, not the naive
+    /// `destinationFolder/source.lastPathComponent` guess. Items whose
+    /// conflict was resolved as "Replace" are already excluded by
+    /// `transfer` itself (see its doc comment) since reversing those
+    /// would need to also restore whatever they overwrote.
+    private func recordTransferUndo(_ pairs: [(source: URL, destination: URL)], move: Bool) {
+        guard !pairs.isEmpty else { return }
+        recordUndoable(
+            actionName: move ? "Move" : "Copy",
+            undo: { [weak self] in
+                guard let self else { return }
+                if move {
+                    // Reverse the move: destination back to source.
+                    // Recreate the original parent in case it was
+                    // itself removed/renamed since — same defensive
+                    // pattern as Trash-restore below.
+                    for pair in pairs {
+                        let parent = pair.source.deletingLastPathComponent()
+                        try? FileManager.default.createDirectory(
+                            at: parent, withIntermediateDirectories: true)
+                        try? FileManager.default.moveItem(at: pair.destination, to: pair.source)
+                    }
+                } else {
+                    // Reverse a copy by trashing the fresh copy it made
+                    // — NOT permanent-delete, matching Duplicate/New
+                    // Folder/New File's undo, so the user has an out if
+                    // they change their mind again after undoing.
+                    _ = FileOperationService.moveToTrash(pairs.map(\.destination))
+                }
+                self.reload()
+            },
+            redo: { [weak self] in
+                guard let self else { return }
+                for pair in pairs {
+                    let parent = pair.destination.deletingLastPathComponent()
+                    try? FileManager.default.createDirectory(
+                        at: parent, withIntermediateDirectories: true)
+                    if move {
+                        try? FileManager.default.moveItem(at: pair.source, to: pair.destination)
+                    } else {
+                        try? FileManager.default.copyItem(at: pair.source, to: pair.destination)
+                    }
+                }
+                self.reload()
+            }
+        )
     }
 
     // MARK: Batch rename
@@ -1463,13 +1515,14 @@ final class TabViewModel: ObservableObject, Identifiable {
         let resolver = ConflictPrompt.resolver()
 
         Task.detached(priority: .userInitiated) {
-            await FileOperationService.transfer(
+            let pairs = await FileOperationService.transfer(
                 sources, to: destination, move: move,
                 progress: progress, resolver: resolver
             )
             await MainActor.run { [weak self] in
                 self?.reload()
                 self?.finishTransferSheet(progress)
+                self?.recordTransferUndo(pairs, move: move)
             }
         }
     }

@@ -358,6 +358,21 @@ private struct SidebarFolderRow: View {
                             BookmarkService.shared.pin(node.url)
                         }
                     }
+                    if isEjectableVolume {
+                        Divider()
+                        Button("Eject \u{201C}\(node.displayName)\u{201D}") { eject() }
+                    }
+                }
+
+                if isEjectableVolume {
+                    Spacer(minLength: 4)
+                    Button(action: eject) {
+                        Image(systemName: "eject")
+                            .feFont(size: 11)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Eject \u{201C}\(node.displayName)\u{201D}")
                 }
             }
             .padding(.leading, CGFloat(depth) * 12)
@@ -367,6 +382,34 @@ private struct SidebarFolderRow: View {
                     SidebarFolderRow(node: child, tab: tab, depth: depth + 1)
                 }
             }
+        }
+    }
+
+    /// Only a ROOT external-drive row gets an eject control — Macintosh
+    /// HD can't be ejected, and a `depth > 0` row is a subfolder, not a
+    /// volume, even if it happens to share the disk icon's symbol.
+    private var isEjectableVolume: Bool {
+        depth == 0 && node.symbol == "externaldrive"
+    }
+
+    /// Unmount + eject. If this tab is currently browsing the volume
+    /// (or a folder inside it), navigate Home FIRST — Finder does the
+    /// same when you eject a disk a window is pointed at, and without
+    /// this the tab would be left showing a "Cannot read folder" error
+    /// for a location that no longer exists.
+    private func eject() {
+        if tab.currentURL.path == node.url.path
+            || tab.currentURL.path.hasPrefix(node.url.path + "/") {
+            tab.navigate(to: FileManager.default.homeDirectoryForCurrentUser)
+        }
+        do {
+            try NSWorkspace.shared.unmountAndEjectDevice(at: node.url)
+        } catch {
+            // Most common real-world cause: a file on the volume is
+            // still open in some app (including a stale FSEvents watch
+            // in this app itself, though navigating away above already
+            // tears that down).
+            tab.reportOpError("Couldn\u{2019}t eject \u{201C}\(node.displayName)\u{201D}: \(error.localizedDescription)")
         }
     }
 }
@@ -379,6 +422,7 @@ private final class SidebarRootStore: ObservableObject {
     let trashURL: URL
 
     private var mountObservers: [NSObjectProtocol] = []
+    private var activationObserver: NSObjectProtocol?
 
     init() {
         let fm = FileManager.default
@@ -404,12 +448,29 @@ private final class SidebarRootStore: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in self?.rebuildRoots() }
         }
+        // `didUnmountNotification` is reliable for a PROPER eject (this
+        // app's own eject button, Finder, `diskutil eject`) but not
+        // guaranteed for a surprise removal — physically yanking a USB
+        // drive without ejecting it first. Re-verifying whenever the
+        // app regains focus self-heals a missed/delayed notification
+        // within one focus switch instead of leaving a dead volume
+        // listed until something else happens to trigger a rebuild.
+        let didActivate = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.rebuildRoots() }
+        }
         self.mountObservers = [didMount, didUnmount]
+        self.activationObserver = didActivate
     }
 
     deinit {
         let center = NSWorkspace.shared.notificationCenter
         mountObservers.forEach { center.removeObserver($0) }
+        if let didActivate = activationObserver {
+            NotificationCenter.default.removeObserver(didActivate)
+        }
     }
 
     private func rebuildRoots() {
