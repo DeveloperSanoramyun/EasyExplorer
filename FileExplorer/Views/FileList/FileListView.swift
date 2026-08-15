@@ -888,7 +888,12 @@ final class TableRenameClickDetector {
                   before == after,                       // click didn't change selection
                   after.count == 1, let only = after.first,
                   let sole = self.soleSince, sole.url == only,
-                  Date().timeIntervalSince(sole.at) > NSEvent.doubleClickInterval
+                  Date().timeIntervalSince(sole.at) > NSEvent.doubleClickInterval,
+                  // Same guard as the gesture-view detector: with only
+                  // one row in the whole table, re-clicking it is the
+                  // only thing TO click, not a deliberate rename signal.
+                  // F2 / ⌘Return / right-click → Rename still work.
+                  tab.visibleItems.count > 1
             else { return }
             self.renameArm?.cancel()
             let work = DispatchWorkItem {

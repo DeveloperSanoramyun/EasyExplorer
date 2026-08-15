@@ -245,6 +245,16 @@ final class SlowClickRename {
     func arm(_ url: URL, wasSoleSelection: Bool, tab: TabViewModel) {
         cancel()
         guard wasSoleSelection else { return }
+        // When this is the ONLY item in the folder, every click after
+        // the first is necessarily "re-click the already-sole-selected
+        // row" — the one signal this whole detector uses to infer
+        // rename intent. With something else to click, re-clicking the
+        // SAME row is a deliberate, meaningful signal; with nothing
+        // else TO click, it's just how you'd reselect it, confirm focus,
+        // or click around while thinking, and it kept accidentally
+        // dropping into rename after a pause. Explicit rename (F2 /
+        // ⌘Return / right-click → Rename) is untouched.
+        guard tab.visibleItems.count > 1 else { return }
         // Not the 2nd press of a double-click that just opened …
         guard Date().timeIntervalSince(lastOpenAt) > NSEvent.doubleClickInterval else { return }
         // … not the click that just dismissed a rename …
