@@ -67,6 +67,9 @@ struct ActionToolbar: View {
                 ShareService.showPicker(for: tab.selectedURLs)
             }
 
+            button("list.bullet.rectangle", help: "Last Operation Results", enabled: tab.hasOperationResults && !tab.hasActiveTransfer) {
+                tab.showOperationResults()
+            }
             Spacer()
         }
         .padding(.horizontal, 10)
@@ -89,5 +92,6 @@ struct ActionToolbar: View {
         .buttonStyle(.borderless)
         .disabled(!enabled)
         .help(help)
+        .accessibilityLabel(help)
     }
 }

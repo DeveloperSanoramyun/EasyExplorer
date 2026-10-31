@@ -45,18 +45,18 @@ struct PermissionGuideDialog: View {
             // approve Desktop/Documents/Downloads individually.
             VStack(alignment: .leading, spacing: 12) {
                 bulletRow(
-                    icon: "checkmark.shield.fill",
-                    title: "Full Disk Access (recommended)",
-                    body: "One click — every folder works. macOS won't ask again, even after rebuilds.",
-                    action: PermissionGuide.openFullDiskAccessSettings,
-                    actionLabel: "Open Full Disk Access…"
-                )
-                bulletRow(
                     icon: "folder.badge.gearshape",
-                    title: "Files & Folders (per folder)",
-                    body: "Approve Desktop / Documents / Downloads individually if you'd rather keep tighter scope.",
+                    title: "Files & Folders (start here)",
+                    body: "Allow the Desktop, Documents or Downloads folders you need. This is sufficient for ordinary folder access.",
                     action: PermissionGuide.openFilesAndFoldersSettings,
                     actionLabel: "Open Files & Folders…"
+                )
+                bulletRow(
+                    icon: "checkmark.shield.fill",
+                    title: "Full Disk Access (only for protected locations)",
+                    body: "Use only when a protected location requires it. Unix permissions and system protection still apply.",
+                    action: PermissionGuide.openFullDiskAccessSettings,
+                    actionLabel: "Open Full Disk Access…"
                 )
             }
 

@@ -22,7 +22,7 @@ enum FileSystemServiceError: LocalizedError {
         switch self {
         case .permissionDenied(let url, let isTCC):
             if isTCC {
-                return "macOS is blocking access to \u{201C}\(url.lastPathComponent)\u{201D}. Grant Full Disk Access to FileExplorer in System Settings → Privacy & Security."
+                return "macOS is blocking access to \u{201C}\(url.lastPathComponent)\u{201D}. Review Files & Folders permissions in System Settings → Privacy & Security. Some protected locations may require Full Disk Access; Unix permissions or system protection may still prevent access."
             }
             return "You don't have permission to read \u{201C}\(url.lastPathComponent)\u{201D}."
         case .notADirectory(let url):
@@ -97,10 +97,12 @@ enum FileSystemService {
     static func isTCCProtected(_ url: URL) -> Bool {
         let path = url.standardizedFileURL.path
         let prefixes = [
-            "/Library/Application Support",
-            "/private/var/db",
-            "/System",
-            NSHomeDirectory() + "/Library",
+            NSHomeDirectory() + "/Desktop",
+            NSHomeDirectory() + "/Documents",
+            NSHomeDirectory() + "/Downloads",
+            NSHomeDirectory() + "/Library/Mail",
+            NSHomeDirectory() + "/Library/Messages",
+            NSHomeDirectory() + "/Library/Safari",
             NSHomeDirectory() + "/.Trash",
         ]
         return prefixes.contains { path == $0 || path.hasPrefix($0 + "/") }

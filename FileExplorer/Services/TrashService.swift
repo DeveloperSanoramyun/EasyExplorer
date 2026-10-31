@@ -10,6 +10,8 @@
 
 import Foundation
 import Combine
+import AppKit
+import Darwin
 
 /// In-memory cache of trashed-item → original-location lookups. The
 /// AppleScript bridge is slow and triggers automation consent on first
@@ -71,21 +73,39 @@ enum TrashService {
     /// Asks Finder to put the given trashed items back to their original
     /// locations. Passing items not actually in Trash is a no-op.
     static func restore(_ urls: [URL]) {
-        // Build an AppleScript that loops over the supplied paths.
-        let posixList = urls
-            .map { "(POSIX file \"\(escape($0.path))\") as alias" }
-            .joined(separator: ", ")
-        guard !posixList.isEmpty else { return }
-        runAppleScript("""
-        tell application "Finder"
-            set theItems to {\(posixList)}
-            repeat with theItem in theItems
-                try
-                    move theItem to (original location of theItem)
-                end try
-            end repeat
-        end tell
-        """)
+        var failures: [String] = []
+        for url in urls {
+            guard let original = rememberedOriginal(url) else {
+                failures.append("\(url.lastPathComponent): original location is unavailable. Use Put Back in Finder.")
+                continue
+            }
+            do {
+                guard !SafeFiles.exists(original) else { throw SafeFiles.error("Original location is occupied: \(original.path)") }
+                try FileManager.default.createDirectory(at: original.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try FileManager.default.moveItem(at: url, to: original)
+            } catch { failures.append(error.localizedDescription) }
+        }
+        if !failures.isEmpty {
+            NSWorkspace.shared.activateFileViewerSelecting(urls)
+            let alert = NSAlert(); alert.messageText = "Some items could not be restored"
+            alert.informativeText = failures.prefix(10).joined(separator: "\n"); alert.runModal()
+        }
+    }
+
+    static func remember(original: URL, trash: URL) {
+        guard let identity = try? FileIdentity(trash) else { return }
+        var records = UserDefaults.standard.dictionary(forKey: "fe.trashOrigins") as? [String: [String: String]] ?? [:]
+        records[trash.path] = ["original": original.path, "device": String(identity.device), "inode": String(identity.inode)]
+        // Bound metadata; the actual files are managed by the system Trash.
+        if records.count > 10_000 { records = records.filter { SafeFiles.exists(URL(fileURLWithPath: $0.key)) } }
+        UserDefaults.standard.set(records, forKey: "fe.trashOrigins")
+    }
+    private static func rememberedOriginal(_ trash: URL) -> URL? {
+        let records = UserDefaults.standard.dictionary(forKey: "fe.trashOrigins") as? [String: [String: String]] ?? [:]
+        guard let record = records[trash.path], let identity = try? FileIdentity(trash),
+              record["device"] == String(identity.device), record["inode"] == String(identity.inode),
+              let original = record["original"] else { return nil }
+        return URL(fileURLWithPath: original)
     }
 
     /// Ask Finder where a trashed item used to live. Public API doesn't
@@ -95,6 +115,7 @@ enum TrashService {
     /// folder no longer exists.
     static func originalLocation(of url: URL) -> URL? {
         guard TrashHelper.isInTrash(url) else { return nil }
+        if let original = rememberedOriginal(url) { return original.deletingLastPathComponent() }
         let script = """
         tell application "Finder"
             try
@@ -120,6 +141,8 @@ enum TrashService {
         _ = script?.executeAndReturnError(&error)
         if let error = error {
             NSLog("Trash AppleScript failed: \(error)")
+            let alert = NSAlert(); alert.messageText = "Trash operation failed"
+            alert.informativeText = "\(error)"; alert.runModal()
         }
     }
 
@@ -146,7 +169,13 @@ enum TrashHelper {
 
     /// True when `url` lives anywhere inside the Trash folder.
     static func isInTrash(_ url: URL) -> Bool {
-        url.standardizedFileURL.path.hasPrefix(trashURL.path + "/")
-            || url.standardizedFileURL.path == trashURL.path
+        let path = url.resolvingSymlinksInPath().standardizedFileURL.path
+        var roots = [trashURL]
+        roots += (FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: nil, options: []) ?? [])
+            .map { $0.appendingPathComponent(".Trashes/" + String(getuid())) }
+        return roots.contains {
+            let root = $0.resolvingSymlinksInPath().standardizedFileURL.path
+            return path == root || path.hasPrefix(root + "/")
+        }
     }
 }

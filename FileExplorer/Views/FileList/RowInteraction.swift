@@ -510,6 +510,23 @@ func openWithFileMenu(for url: URL, tab: TabViewModel) -> some View {
 @MainActor
 func fileListRowContextMenu(for url: URL, tab: TabViewModel) -> some View {
     Button("Open") { openFileListEntry(url, tab: tab) }
+    browserEnhancedActions(for: [url], tab: tab)
+    Button("Compress to ZIP") {
+        ensureFileListSelection(includes: url, tab: tab); tab.compressSelection()
+    }
+    if ArchiveService.supports(url) {
+        Button("Extract into New Folder") {
+            ensureFileListSelection(includes: url, tab: tab); tab.extractSelection()
+        }
+    }
+    if TrashHelper.isInTrash(url) {
+        Button("Restore from Trash") { TrashService.restore([url]); tab.reload() }
+    }
+    if FileSystemService.isReadableDirectory(url) {
+        Button("Calculate Size") {
+            Task { await FolderSizeService.shared.calculate(url); tab.objectWillChange.send() }
+        }
+    }
     if !FileSystemService.isReadableDirectory(url) {
         openWithFileMenu(for: url, tab: tab)
     }
@@ -562,6 +579,10 @@ func fileListBlankContextMenu<ModeMenu: View>(
     tab: TabViewModel,
     @ViewBuilder modeMenu: () -> ModeMenu
 ) -> some View {
+    Button("Last Operation Results…") { tab.showOperationResults() }
+        .disabled(!tab.hasOperationResults || tab.hasActiveTransfer)
+    Button("Retry Failed Items") { tab.retryFailedOperation() }
+        .disabled(!tab.canRetryOperation)
     Menu("New") {
         Button("Folder") { tab.createNewFolder() }
         Button("Text File") {
@@ -589,4 +610,27 @@ func fileListBlankContextMenu<ModeMenu: View>(
     modeMenu()
     Divider()
     Button("Refresh") { tab.reload() }
+}
+
+
+@ViewBuilder
+@MainActor
+func browserEnhancedActions(for selection: Set<URL>, tab: TabViewModel) -> some View {
+        if selection.count == 1, let url = selection.first {
+            Menu("Links and Aliases") {
+                Button("Create Symbolic Link") { BrowserActions.createLink(url, alias: false, tab: tab) }
+                Button("Create Alias") { BrowserActions.createLink(url, alias: true, tab: tab) }
+                Button("Go to Original") { BrowserActions.revealOriginal(url, tab: tab) }
+            }
+            if let status = BrowserActions.cloudStatus(url) {
+                Menu(status) {
+                    Button("Download for Offline Use") { BrowserActions.cloud(url, download: true, tab: tab) }
+                    Button("Remove Local Download") { BrowserActions.cloud(url, download: false, tab: tab) }
+                }
+            }
+            if ArchiveService.supports(url) {
+                Button("Browse Archive…") { tab.browseArchive(url) }
+            }
+        }
+
 }

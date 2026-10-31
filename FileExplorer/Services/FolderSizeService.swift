@@ -1,83 +1,56 @@
-//
-//  FolderSizeService.swift
-//  FileExplorer
-//
-//  Recursive folder size calculation. Off by default because walking a
-//  large tree is expensive — the user triggers it explicitly via
-//  "Calculate Size" in the context menu. Results are cached in memory
-//  and invalidated when the folder is modified (FSEvents).
-//
-
 import Foundation
 import Combine
 
 @MainActor
 final class FolderSizeService: ObservableObject {
-
     static let shared = FolderSizeService()
-
-    /// Cached byte-counts keyed by folder URL. nil = not yet calculated.
+    struct Measurement {
+        let logical: Int64
+        let allocated: Int64
+        let unreadable: Int
+        var summary: String {
+            let a = ByteCountFormatter.string(fromByteCount: logical, countStyle: .file)
+            let b = ByteCountFormatter.string(fromByteCount: allocated, countStyle: .file)
+            return "\(a) (\(b) on disk)" + (unreadable > 0 ? " — incomplete: \(unreadable) unreadable item(s)" : "")
+        }
+    }
     @Published private(set) var sizes: [URL: Int64] = [:]
-
+    @Published private(set) var measurements: [URL: Measurement] = [:]
+    private var generations: [URL: UUID] = [:]
     private init() {}
-
     func cachedSize(of url: URL) -> Int64? { sizes[url] }
-
-    func invalidate(_ url: URL) {
-        sizes.removeValue(forKey: url)
+    func summary(of url: URL) -> String? { measurements[url]?.summary }
+    func invalidate(_ url: URL) { sizes[url] = nil; measurements[url] = nil; generations[url] = UUID() }
+    func invalidateAll() { for url in Set(sizes.keys).union(generations.keys) { invalidate(url) } }
+    func invalidateTree(_ changed: URL) {
+        for url in Set(sizes.keys).union(generations.keys) where SafeFiles.isInside(changed, url) || SafeFiles.isInside(url, changed) { invalidate(url) }
     }
-
-    func invalidateAll() {
-        sizes.removeAll()
-    }
-
-    /// Drop cached sizes for CHILDREN of `parent` that no longer appear
-    /// in `currentURLs` — i.e. folders renamed or trashed externally.
-    /// Called from TabViewModel.reload().
-    ///
-    /// Scoped to `parent`'s direct children on purpose: the previous
-    /// version removed EVERY key not in the current listing, so merely
-    /// navigating from folder A to folder B wiped all of A's calculated
-    /// sizes — "Calculate Size" results never survived a revisit.
     func invalidateMissing(from currentURLs: Set<URL>, in parent: URL) {
-        let stale = sizes.keys.filter {
-            $0.deletingLastPathComponent() == parent && !currentURLs.contains($0)
-        }
-        for url in stale {
-            sizes.removeValue(forKey: url)
-        }
+        for url in Array(sizes.keys) where url.deletingLastPathComponent() == parent && !currentURLs.contains(url) { invalidate(url) }
     }
-
-    // MARK: - Async calculation
-
-    /// Walk the folder tree off the main thread, summing every regular
-    /// file's `totalFileAllocatedSize`. Updates `sizes[url]` on completion.
     func calculate(_ url: URL) async {
-        let total = await Task.detached(priority: .utility) {
-            Self.directorySize(at: url)
-        }.value
-        sizes[url] = total
+        let generation = UUID(); generations[url] = generation
+        let total = await Task.detached(priority: .utility) { Self.measure(url) }.value
+        guard generations[url] == generation else { return }
+        measurements[url] = total; sizes[url] = total.logical
     }
-
-    nonisolated private static func directorySize(at url: URL) -> Int64 {
-        let fm = FileManager.default
-        let keys: [URLResourceKey] = [.isRegularFileKey, .totalFileAllocatedSizeKey, .fileSizeKey]
-        guard let enumerator = fm.enumerator(
-            at: url,
-            includingPropertiesForKeys: keys,
-            options: [.skipsPackageDescendants, .skipsHiddenFiles],
-            errorHandler: nil
-        ) else { return 0 }
-
-        var sum: Int64 = 0
-        for case let fileURL as URL in enumerator {
-            let values = try? fileURL.resourceValues(forKeys: Set(keys))
-            guard values?.isRegularFile == true else { continue }
-            // Prefer allocated size (matches Finder's "Get Info"); fall
-            // back to logical fileSize.
-            let bytes = values?.totalFileAllocatedSize ?? values?.fileSize ?? 0
-            sum += Int64(bytes)
+    nonisolated static func measure(_ url: URL) -> Measurement {
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey, .totalFileAllocatedSizeKey, .fileSizeKey]
+        var unreadable = 0
+        var logical: Int64 = 0, allocated: Int64 = 0
+        var seen: Set<String> = []
+        guard let iterator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: Array(keys), options: [],
+            errorHandler: { _, _ in unreadable += 1; return true }) else { return Measurement(logical: 0, allocated: 0, unreadable: 1) }
+        for case let file as URL in iterator {
+            do {
+                let values = try file.resourceValues(forKeys: keys)
+                guard values.isRegularFile == true, values.isSymbolicLink != true else { continue }
+                let identity = try FileIdentity(file)
+                guard seen.insert("\(identity.device):\(identity.inode)").inserted else { continue }
+                logical += Int64(values.fileSize ?? 0)
+                allocated += Int64(values.totalFileAllocatedSize ?? values.fileSize ?? 0)
+            } catch { unreadable += 1 }
         }
-        return sum
+        return Measurement(logical: logical, allocated: allocated, unreadable: unreadable)
     }
 }

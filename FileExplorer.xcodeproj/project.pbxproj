@@ -57,6 +57,7 @@
 		662BAF43E4B148F489481B83 /* PermissionGuideDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50D2BF15C3F74BAB8AF9DF74 /* PermissionGuideDialog.swift */; };
 		8B32E4D3BADB57A29F79871A /* PreviewPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0973B0650B6D51C9AC91C6AE /* PreviewPane.swift */; };
 		996A43CDCBE55151AC17F37E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3BDFE1516DF754DF8B399EE1 /* Assets.xcassets */; };
+		AB1000000000000000000001 /* SafeFileOperations.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1000000000000000000002; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -113,6 +114,8 @@
 		1897BAC672455602B2107623 /* FileExplorer.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = FileExplorer.entitlements; sourceTree = "<group>"; };
 		3BDFE1516DF754DF8B399EE1 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		21A99926D258574F8BFD1B16 /* FileExplorer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FileExplorer.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AB1000000000000000000002 /* SafeFileOperations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/SafeFileOperations.swift; sourceTree = "<group>"; };
+		AB1000000000000000000004 /* ArchiveBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ArchiveBridge.h; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -148,6 +151,8 @@
 				7DDA2A9776C556D88EFEFB34 /* WindowState.swift */,
 				E12A13157232544D813FB70E /* FileSystemService.swift */,
 				5DA37549E4505D0082641A02 /* FileOperationService.swift */,
+				AB1000000000000000000002 /* SafeFileOperations.swift */,
+				AB1000000000000000000004 /* ArchiveBridge.h */,
 				AC91FEDC22D15D608F9E85BB /* ClipboardService.swift */,
 				E41E39B3CA0751B3904E9DF3 /* FileWatcherService.swift */,
 				70830587A8EF5F1E966F7EE3 /* BookmarkService.swift */,
@@ -265,6 +270,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AB1000000000000000000001 /* SafeFileOperations.swift in Sources */,
 				5604FAC6FCE35825A704634F /* FileExplorerApp.swift in Sources */,
 				C988739AC7825026B85F9616 /* ContentView.swift in Sources */,
 				D5C82B9EC80D471297BD49EC /* PaneBrowser.swift in Sources */,
@@ -373,6 +379,8 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_HARDENED_RUNTIME = YES;
+				OTHER_LDFLAGS = "$(inherited) -larchive";
+				SWIFT_OBJC_BRIDGING_HEADER = "FileExplorer/ArchiveBridge.h";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = FileExplorer/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -395,6 +403,8 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_HARDENED_RUNTIME = YES;
+				OTHER_LDFLAGS = "$(inherited) -larchive";
+				SWIFT_OBJC_BRIDGING_HEADER = "FileExplorer/ArchiveBridge.h";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = FileExplorer/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (

@@ -105,6 +105,15 @@ struct AddressBar: View {
                   ? "Searching all of This Mac — click to limit to current folder"
                   : "Searching current folder — click to search This Mac")
 
+            Menu {
+                Toggle("Search file contents", isOn: $tab.searchContents)
+                if let notice = tab.spotlightService?.notice { Text(notice) }
+            } label: { Image(systemName: "text.magnifyingglass") }
+                .menuStyle(.borderlessButton).frame(width: 18)
+            if let search = tab.spotlightService, search.hasMore {
+                Button("More…") { search.loadMore() }
+                    .help("Results are limited; load the next 500 matches")
+            }
             TextField(searchPlaceholder, text: $tab.searchQuery)
                 .textFieldStyle(.plain)
                 .feFont(size: 12)

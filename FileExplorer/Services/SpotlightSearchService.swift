@@ -1,131 +1,117 @@
-//
-//  SpotlightSearchService.swift
-//  FileExplorer
-//
-//  Thin wrapper around `NSMetadataQuery` for system-wide file search.
-//  Results stream in via the gathering/update notifications and are
-//  delivered to subscribers on the main queue.
-//
-//  Usage:
-//      let service = SpotlightSearchService()
-//      service.search("invoice", scope: nil)         // search everything
-//      service.search("README", scope: someFolderURL) // confine to subtree
-//      // Observe `results` via @ObservedObject.
-//
-
 import Foundation
 import Combine
 
 @MainActor
 final class SpotlightSearchService: ObservableObject {
-
-    /// File URLs returned by the active query. Capped at `resultLimit`
-    /// so UIs aren't asked to render 50 000 rows.
     @Published private(set) var results: [URL] = []
-    @Published private(set) var isSearching: Bool = false
-
-    private let resultLimit = 500
+    @Published private(set) var isSearching = false
+    @Published private(set) var hasMore = false
+    @Published private(set) var notice: String?
+    private var limit = 500
     private var query: NSMetadataQuery?
     private var observers: [NSObjectProtocol] = []
+    private var generation = UUID()
+    private var scanControl = OperationControl()
+    private var scanned: [URL] = []
+    private var scanning = false
+    private var gathering = false
+    deinit { scanControl.cancel(); observers.forEach { NotificationCenter.default.removeObserver($0) }; query?.stop() }
 
-    deinit {
-        // Tear down on dealloc (deinit is nonisolated; observer removal
-        // is thread-safe on NotificationCenter).
-        observers.forEach { NotificationCenter.default.removeObserver($0) }
-        query?.stop()
+    func search(_ text: String, scope: URL? = nil, contents: Bool = false) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { stop(); return }
+        let predicate = contents
+            ? NSPredicate(format: "%K CONTAINS[cd] %@ OR %K CONTAINS[cd] %@", NSMetadataItemFSNameKey, text, "kMDItemTextContent", text)
+            : NSPredicate(format: "%K CONTAINS[cd] %@", NSMetadataItemFSNameKey, text)
+        start(predicate, scope: scope)
+        if let scope { startScan(text, scope: scope, contents: contents) }
     }
-
-    // MARK: - Public API
-
-    /// Start a fresh filename query. Replaces any existing search.
-    func search(_ text: String, scope: URL? = nil) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { stop(); return }
-        let predicate = NSPredicate(
-            format: "%K LIKE[cd] %@",
-            NSMetadataItemFSNameKey, "*\(trimmed)*"
-        )
-        start(predicate: predicate, scope: scope)
+    func searchByTag(_ tag: String, scope: URL? = nil) {
+        guard !tag.isEmpty else { stop(); return }
+        start(NSPredicate(format: "%K LIKE[cd] %@", "kMDItemUserTags", tag), scope: scope)
     }
-
-    /// Find every file tagged with `tagName`. Used by the sidebar's
-    /// Tags section — `kMDItemUserTags` is the multi-value attribute
-    /// Finder writes when the user applies a colour tag.
-    func searchByTag(_ tagName: String, scope: URL? = nil) {
-        let trimmed = tagName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { stop(); return }
-        // LIKE on a multi-value attribute matches the array element-wise.
-        let predicate = NSPredicate(
-            format: "%K LIKE[cd] %@",
-            "kMDItemUserTags", trimmed
-        )
-        start(predicate: predicate, scope: scope)
-    }
-
-    private func start(predicate: NSPredicate, scope: URL?) {
-        stop()
-        let q = NSMetadataQuery()
-        q.predicate = predicate
-        q.searchScopes = scope.map { [$0 as Any] }
-            ?? [NSMetadataQueryLocalComputerScope]
-        // Batching reduces UI churn while results flood in.
-        q.notificationBatchingInterval = 0.3
-
-        // Read the query back off `self.query` (set just below) inside the
-        // @MainActor hop rather than capturing the local `q` directly —
-        // `NSMetadataQuery` isn't Sendable, so closing over it across the
-        // @Sendable NotificationCenter callback boundary is unsound even
-        // though delivery is already serialized on `queue: .main`.
-        let gather = NotificationCenter.default.addObserver(
-            forName: .NSMetadataQueryDidFinishGathering,
-            object: q, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, let query = self.query else { return }
-                self.handleResults(query)
-                self.isSearching = false
-            }
-        }
-        let update = NotificationCenter.default.addObserver(
-            forName: .NSMetadataQueryDidUpdate,
-            object: q, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, let query = self.query else { return }
-                self.handleResults(query)
-            }
-        }
-        observers = [gather, update]
-
-        isSearching = true
-        results = []
-        query = q
-        q.start()
-    }
-
+    func loadMore() { limit += 500; publish() }
     func stop() {
-        query?.stop()
-        observers.forEach { NotificationCenter.default.removeObserver($0) }
-        observers.removeAll()
-        query = nil
-        results = []
-        isSearching = false
+        generation = UUID(); scanControl.cancel(); scanControl = OperationControl()
+        query?.stop(); query = nil
+        observers.forEach { NotificationCenter.default.removeObserver($0) }; observers = []
+        results = []; scanned = []; hasMore = false; notice = nil
+        gathering = false; scanning = false; isSearching = false; limit = 500
     }
-
-    // MARK: - Results
-
-    private func handleResults(_ q: NSMetadataQuery) {
-        q.disableUpdates()
-        defer { q.enableUpdates() }
-
-        var urls: [URL] = []
-        urls.reserveCapacity(min(q.resultCount, resultLimit))
-        for i in 0..<min(q.resultCount, resultLimit) {
-            guard let item = q.result(at: i) as? NSMetadataItem,
-                  let path = item.value(forAttribute: NSMetadataItemPathKey) as? String
-            else { continue }
-            urls.append(URL(fileURLWithPath: path))
+    private func start(_ predicate: NSPredicate, scope: URL?) {
+        stop()
+        let q = NSMetadataQuery(); query = q
+        q.predicate = predicate
+        q.searchScopes = scope.map { [$0 as Any] } ?? [NSMetadataQueryLocalComputerScope]
+        q.notificationBatchingInterval = 0.3
+        let id = generation
+        for name in [Notification.Name.NSMetadataQueryDidFinishGathering, .NSMetadataQueryDidUpdate] {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: q, queue: .main) { [weak self] notification in
+                let finished = notification.name == .NSMetadataQueryDidFinishGathering
+                Task { @MainActor in
+                    guard let self, self.generation == id else { return }
+                    if finished { self.gathering = false }
+                    self.publish()
+                }
+            })
         }
-        results = urls
+        gathering = true; isSearching = true
+        if !q.start() { gathering = false; isSearching = false; notice = "Spotlight is unavailable; folder search can still scan the disk." }
+    }
+    private func publish() {
+        var all = scanned
+        var seen = Set(all)
+        if let q = query {
+            q.disableUpdates(); defer { q.enableUpdates() }
+            for i in 0..<min(q.resultCount, limit + 1) {
+                guard let item = q.result(at: i) as? NSMetadataItem,
+                      let path = item.value(forAttribute: NSMetadataItemPathKey) as? String else { continue }
+                let url = URL(fileURLWithPath: path)
+                if seen.insert(url).inserted { all.append(url) }
+            }
+            hasMore = q.resultCount > limit || all.count > limit
+        } else { hasMore = all.count > limit }
+        results = Array(all.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }.prefix(limit))
+        isSearching = gathering || scanning
+    }
+    private func startScan(_ text: String, scope: URL, contents: Bool) {
+        let id = generation, control = scanControl
+        scanning = true; isSearching = true
+        Task { [weak self] in
+            let scan = await Task.detached(priority: .utility) { Self.scan(text, scope: scope, contents: contents, control: control) }.value
+            guard let self, self.generation == id else { return }
+            self.scanned = scan.urls; self.scanning = false; self.notice = scan.notice; self.publish()
+        }
+    }
+    struct ScanResult { let urls: [URL]; let notice: String? }
+    nonisolated static func scan(_ text: String, scope: URL, contents: Bool, control: OperationControl) -> ScanResult {
+        let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey, .isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey]
+        var unreadable = 0
+        let deadline = Date().addingTimeInterval(60)
+        guard let iterator = FileManager.default.enumerator(at: scope, includingPropertiesForKeys: keys, options: [.skipsPackageDescendants],
+            errorHandler: { _, _ in unreadable += 1; return true }) else { return ScanResult(urls: [], notice: "Folder could not be scanned.") }
+        var urls: [URL] = []
+        var limited = false
+        let textExtensions: Set<String> = ["txt", "md", "csv", "tsv", "json", "xml", "html", "css", "js", "ts", "swift", "py", "c", "h", "log", "yaml", "yml", "tex"]
+        for case let url as URL in iterator {
+            if control.isCancelled { break }
+            if Date() > deadline || urls.count >= 50_000 { limited = true; break }
+            if url.lastPathComponent.contains(".FileExplorer-Recovery-") { iterator.skipDescendants(); continue }
+            var matches = url.lastPathComponent.range(of: text, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+            if !matches, contents, textExtensions.contains(url.pathExtension.lowercased()),
+               let v = try? url.resourceValues(forKeys: Set(keys)), v.isRegularFile == true,
+               v.isSymbolicLink != true, (v.fileSize ?? Int.max) <= 1_048_576,
+               v.isUbiquitousItem != true || v.ubiquitousItemDownloadingStatus == .current,
+               let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+               let string = String(data: data, encoding: .utf8) {
+                matches = string.range(of: text, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+            }
+            if matches { urls.append(url) }
+        }
+        var notes: [String] = []
+        if limited { notes.append("Scan stopped at 60 seconds or 50,000 matches. Narrow the folder or query.") }
+        if unreadable > 0 { notes.append("\(unreadable) folder(s) could not be read.") }
+        if contents { notes.append("Disk content scan covers local UTF-8 text files up to 1 MB; Spotlight may include other indexed formats.") }
+        return ScanResult(urls: urls, notice: notes.isEmpty ? nil : notes.joined(separator: " "))
     }
 }

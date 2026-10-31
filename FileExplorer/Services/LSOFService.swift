@@ -23,22 +23,9 @@ enum LSOFService {
     /// nothing — we treat "couldn't tell" as "nothing holding it".
     /// Synchronous; callers run it from a background Task.
     static func holders(of url: URL) -> [Holder] {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        // -F pcLu: machine-readable output with fields p(pid), c(command),
-        //          L(login user), u(uid).
-        process.arguments = ["-F", "pcL", url.path]
-        let outPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-        } catch {
-            return []
-        }
-        process.waitUntilExit()
-        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-        guard let text = String(data: data, encoding: .utf8) else { return [] }
+        guard let result = try? ProcessRunner.run("/usr/sbin/lsof", ["-F", "pcL", "--", url.path], timeout: 10),
+              result.status == 0 || result.status == 1,
+              let text = String(data: result.output, encoding: .utf8) else { return [] }
         return parseLSOFOutput(text)
     }
 

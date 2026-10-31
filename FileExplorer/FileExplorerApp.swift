@@ -25,6 +25,9 @@ struct FileExplorerApp: App {
     // folder. The global default for unseen folders still lives in
     // @AppStorage but is read from ContentView / FileListView instead.
 
+    init() {
+        Task.detached(priority: .utility) { RecoveryStore.cleanAbandoned() }
+    }
     var body: some Scene {
         // `for: URL.self` (rather than a plain `WindowGroup { ContentView() }`)
         // lets tab tear-off (TabBar's "Move to New Window") open a window
@@ -47,6 +50,8 @@ struct FileExplorerApp: App {
                 Button("Reopen Closed Tab") { post(.feReopenClosedTab) }
                     .keyboardShortcut("t", modifiers: [.command, .shift])
                 Divider()
+                Button("Connect to Server…") { BrowserActions.connectToServer() }
+                    .keyboardShortcut("k", modifiers: .command)
                 Button("New Folder") { post(.feNewFolder) }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
             }
@@ -192,8 +197,10 @@ struct FileExplorerApp: App {
             // Disk Access without hunting through System Settings.
             CommandGroup(replacing: .help) {
                 Button("Folder Access…") { post(.feShowPermissionGuide) }
+                Button("Recovery Folders…") { BrowserActions.showRecoveryFolders() }
             }
         }
+        Settings { BrowserPreferencesView() }
     }
 
     private func post(_ name: Notification.Name) {
@@ -205,5 +212,61 @@ struct FileExplorerApp: App {
             name: .feSetViewMode, object: nil,
             userInfo: ["mode": mode.rawValue]
         )
+    }
+}
+
+
+private struct BrowserPreferencesView: View {
+    @AppStorage("fe.backspaceAction") private var backspace = "back"
+    @AppStorage("fe.returnAction") private var enter = "open"
+    @AppStorage("fe.showExtensions") private var extensions = true
+    @AppStorage("fe.columnCustomization") private var columns = Data()
+    @State private var name = "My Columns"
+    @State private var presetNames: [String] = []
+    @State private var selectedPreset = ""
+    private var presets: [String: Data] { UserDefaults.standard.dictionary(forKey: "fe.columnPresets") as? [String: Data] ?? [:] }
+    var body: some View {
+        Form {
+            Section("Keyboard") {
+                Picker("Backspace", selection: $backspace) {
+                    Text("Back in History").tag("back")
+                    Text("Parent Folder").tag("up")
+                    Text("Move Selection to Trash").tag("trash")
+                }
+                Picker("Return", selection: $enter) {
+                    Text("Open Selection").tag("open")
+                    Text("Rename Selection").tag("rename")
+                }
+            }
+            Section("File Names") {
+                Toggle("Show file extensions", isOn: $extensions)
+            }
+            Section("Column Presets") {
+                TextField("Preset name", text: $name)
+                Button("Save Current Columns") {
+                    let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { return }
+                    var all = presets; all[trimmed] = columns
+                    UserDefaults.standard.set(all, forKey: "fe.columnPresets")
+                    presetNames = all.keys.sorted(); selectedPreset = trimmed
+                }
+                Picker("Saved preset", selection: $selectedPreset) {
+                    Text("Choose a preset").tag("")
+                    ForEach(presetNames, id: \.self) { Text($0).tag($0) }
+                }
+                HStack {
+                    Button("Apply") { if let data = presets[selectedPreset] { columns = data } }
+                    Button("Delete Preset") {
+                        var all = presets; all[selectedPreset] = nil
+                        UserDefaults.standard.set(all, forKey: "fe.columnPresets")
+                        presetNames = all.keys.sorted(); selectedPreset = ""
+                    }
+                }.disabled(selectedPreset.isEmpty)
+            }
+            Text("Cut/Copy into Finder carries file URLs; Finder may treat Cut as Copy. Use Paste here to preserve Cut = Move.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .formStyle(.grouped).frame(width: 500, height: 490)
+        .onAppear { presetNames = presets.keys.sorted() }
     }
 }

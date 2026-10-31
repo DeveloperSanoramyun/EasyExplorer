@@ -18,6 +18,8 @@ import SwiftUI
 
 struct KeyboardHandler: ViewModifier {
     @ObservedObject var tab: TabViewModel
+    @AppStorage("fe.backspaceAction") private var backspaceAction = "back"
+    @AppStorage("fe.returnAction") private var returnAction = "open"
 
     /// On-screen item rectangles (named-coordinate-space) supplied by
     /// grid views so arrow keys can navigate in true 2D. Empty for
@@ -66,7 +68,11 @@ struct KeyboardHandler: ViewModifier {
                 // Skipped during inline rename so Backspace edits text.
                 guard tab.renamingItemID == nil else { return .ignored }
                 guard press.modifiers.isEmpty else { return .ignored }
-                tab.goBack()
+                switch backspaceAction {
+                case "up": tab.goUp()
+                case "trash": tab.moveSelectedToTrash()
+                default: tab.goBack()
+                }
                 return .handled
             }
             // ⌥(Alt)+Up = Up to parent — the Windows reflex now that
@@ -118,7 +124,8 @@ struct KeyboardHandler: ViewModifier {
                 guard tab.renamingItemID == nil else { return .ignored }
                 guard press.modifiers.isEmpty,
                       !tab.selectedURLs.isEmpty else { return .ignored }
-                tab.openSelected()
+                if returnAction == "rename" { tab.beginRenameSelected() }
+                else { tab.openSelected() }
                 return .handled
             }
             .onKeyPress(.escape) {

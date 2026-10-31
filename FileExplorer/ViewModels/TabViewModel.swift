@@ -199,6 +199,7 @@ final class TabViewModel: ObservableObject, Identifiable {
 
     /// Spotlight search results when scope == .thisMac. nil otherwise.
     @Published var spotlightService: SpotlightSearchService? = nil
+    @Published var searchContents = false { didSet { searchQueryChanged() } }
 
     // MARK: Search filters
 
@@ -266,6 +267,16 @@ final class TabViewModel: ObservableObject, Identifiable {
 
     // In-flight operation state (Sprint 3)
     @Published var transferProgress: FileOperationProgress? = nil
+    private var lastOperationProgress: FileOperationProgress?
+    private var retryOperation: (() -> Void)?
+    var canRetryOperation: Bool { retryOperation != nil && !hasActiveTransfer }
+    func retryFailedOperation() { retryOperation?() }
+    var hasOperationResults: Bool { lastOperationProgress != nil }
+    func showOperationResults() {
+        guard !hasActiveTransfer, let lastOperationProgress else { return }
+        transferProgress = lastOperationProgress; transferDialogVisible = true
+    }
+
     /// Gates the progress SHEET (separate from `transferProgress`, which
     /// always tracks the live op for `hasActiveTransfer`). The sheet is
     /// shown only after a short delay — a fast operation finishes first
@@ -284,6 +295,7 @@ final class TabViewModel: ObservableObject, Identifiable {
     /// `transferProgress = progress`.
     func beginTransferSheet(_ progress: FileOperationProgress) {
         transferProgress = progress
+        retryOperation = nil
         transferDialogVisible = false
         // Only pop the dialog if the op is still running after a beat.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
@@ -297,6 +309,7 @@ final class TabViewModel: ObservableObject, Identifiable {
     /// error so the user can read it.
     func finishTransferSheet(_ progress: FileOperationProgress) {
         guard transferProgress === progress else { return }
+        lastOperationProgress = progress
         if progress.errorMessage != nil {
             transferDialogVisible = true            // always surface errors
         } else if transferDialogVisible {
@@ -346,6 +359,7 @@ final class TabViewModel: ObservableObject, Identifiable {
             // download / `tar -x`) still drives many callbacks. Add a
             // 300 ms post-event quiet period so reload fires at most
             // once per chunk of activity, not per chunk-of-FSEvent.
+            if let self { FolderSizeService.shared.invalidateTree(self.currentURL) }
             self?.scheduleReload()
         }
     }
@@ -479,11 +493,28 @@ final class TabViewModel: ObservableObject, Identifiable {
 
     // MARK: Reload / sort
 
+    private var reloadGeneration = UUID()
+    private var lastListedURL: URL?
     func reload() {
+        let generation = UUID(); reloadGeneration = generation
+        let requestedURL = currentURL
+        let includeHidden = showHidden
+        if lastListedURL != requestedURL { items = [] }
+        lastListedURL = requestedURL
+        Task { [weak self] in
+            let result: Result<[FileItem], Error> = await Task.detached(priority: .userInitiated) {
+                Result { try FileSystemService.listDirectory(at: requestedURL, includeHidden: includeHidden) }
+            }.value
+            guard let self, self.reloadGeneration == generation, self.currentURL == requestedURL else { return }
+            self.applyListing(result)
+        }
+    }
+
+    private func applyListing(_ result: Result<[FileItem], Error>) {
         errorMessage = nil
         permissionBlockedURL = nil
         do {
-            let list = try FileSystemService.listDirectory(at: currentURL, includeHidden: showHidden)
+            let list = try result.get()
             items = sorted(list)
             // Prune selection of URLs that no longer exist after the
             // listing refresh — external rename / delete via Finder /
@@ -585,8 +616,8 @@ final class TabViewModel: ObservableObject, Identifiable {
     /// without unbounded memory.
     private struct UndoableOperation {
         let actionName: String
-        let undo: () -> Void
-        let redo: () -> Void
+        let undo: () throws -> Void
+        let redo: () throws -> Void
     }
     private var undoStack: [UndoableOperation] = []
     private var redoStack: [UndoableOperation] = []
@@ -599,8 +630,8 @@ final class TabViewModel: ObservableObject, Identifiable {
     @Published private(set) var redoActionName: String = ""
 
     fileprivate func recordUndoable(actionName: String,
-                                    undo: @escaping () -> Void,
-                                    redo: @escaping () -> Void) {
+                                    undo: @escaping () throws -> Void,
+                                    redo: @escaping () throws -> Void) {
         undoStack.append(UndoableOperation(actionName: actionName,
                                            undo: undo, redo: redo))
         if undoStack.count > undoStackLimit {
@@ -620,17 +651,21 @@ final class TabViewModel: ObservableObject, Identifiable {
     }
 
     func performUndo() {
-        guard let op = undoStack.popLast() else { return }
-        op.undo()
-        redoStack.append(op)
-        refreshUndoState()
+        guard !hasActiveTransfer, let op = undoStack.last else { return }
+        do {
+            try op.undo()
+            undoStack.removeLast(); redoStack.append(op)
+            refreshUndoState(); reload()
+        } catch { reportOpError(error.localizedDescription); reload() }
     }
 
     func performRedo() {
-        guard let op = redoStack.popLast() else { return }
-        op.redo()
-        undoStack.append(op)
-        refreshUndoState()
+        guard !hasActiveTransfer, let op = redoStack.last else { return }
+        do {
+            try op.redo()
+            redoStack.removeLast(); undoStack.append(op)
+            refreshUndoState(); reload()
+        } catch { reportOpError(error.localizedDescription); reload() }
     }
 
     // MARK: Selection helpers
@@ -844,7 +879,7 @@ final class TabViewModel: ObservableObject, Identifiable {
                 .sink { [weak self] _ in self?.objectWillChange.send() }
         }
         let scopeURL: URL? = (searchScope == .folder) ? currentURL : nil
-        spotlightService?.search(q, scope: scopeURL)
+        spotlightService?.search(q, scope: scopeURL, contents: searchContents)
     }
 
     /// Convenience for the ⌘⇧F shortcut — flip into global mode and
@@ -922,64 +957,22 @@ final class TabViewModel: ObservableObject, Identifiable {
     /// Finder's ⌘D — copy each selected item next to itself, then
     /// select the duplicates so the user can immediately rename them.
     func duplicateSelected() {
-        let urls = selectedURLs
-        guard !urls.isEmpty else { return }
-        do {
-            // `var` so redo can re-capture the freshly-made copies —
-            // a re-duplicate produces new "copy 2" URLs, and undo must
-            // trash *those*, not the original (now-trashed) set.
-            var created = try FileOperationService.duplicate(urls)
-            reload()
-            selectedIDs = Set(created)
-            selectionAnchor = created.first
-            // Undo a duplicate by trashing the new copies (NOT
-            // permanent-delete — keeps an out for the user if they
-            // change their mind again). Redo re-duplicates.
-            recordUndoable(
-                actionName: "Duplicate",
-                undo: { [weak self] in
-                    _ = FileOperationService.moveToTrash(created)
-                    self?.reload()
-                },
-                redo: { [weak self] in
-                    if let again = try? FileOperationService.duplicate(urls) {
-                        created = again
-                    }
-                    self?.reload()
-                }
-            )
-        } catch {
-            reportOpError(error.localizedDescription)
-            reload()
-        }
+        guard !selectedURLs.isEmpty else { return }
+        transferDropped(selectedURLs, to: currentURL, mode: .copy)
     }
 
     // MARK: New folder
 
     func createNewFolder() {
         do {
-            var url = try FileOperationService.createNewFolder(in: currentURL)
+            let url = try FileOperationService.createNewFolder(in: currentURL)
             reload()
             // Pre-select + put it into rename mode so the user can type a name.
             selectedIDs = [url]
             renamingItemID = url
-            // Undo trashes the created folder; redo re-creates and
-            // re-captures the new URL so a following undo trashes the
-            // right one (auto-numbering may differ).
-            let parent = currentURL
-            recordUndoable(
-                actionName: "New Folder",
-                undo: { [weak self] in
-                    _ = FileOperationService.moveToTrash([url])
-                    self?.reload()
-                },
-                redo: { [weak self] in
-                    if let again = try? FileOperationService.createNewFolder(in: parent) {
-                        url = again
-                    }
-                    self?.reload()
-                }
-            )
+            let record = try TransferRecord(source: url, destination: url, move: false, backup: nil)
+            recordTransferUndo([record], move: false)
+
         } catch {
             reportOpError(error.localizedDescription)
         }
@@ -989,7 +982,7 @@ final class TabViewModel: ObservableObject, Identifiable {
     /// for now). Pre-selects + opens inline rename, same as new folder.
     func createNewFile(baseName: String, extension ext: String, contents: Data? = nil) {
         do {
-            var url = try FileOperationService.createNewFile(
+            let url = try FileOperationService.createNewFile(
                 in: currentURL,
                 baseName: baseName,
                 extension: ext,
@@ -998,23 +991,9 @@ final class TabViewModel: ObservableObject, Identifiable {
             reload()
             selectedIDs = [url]
             renamingItemID = url
-            let parent = currentURL
-            recordUndoable(
-                actionName: "New File",
-                undo: { [weak self] in
-                    _ = FileOperationService.moveToTrash([url])
-                    self?.reload()
-                },
-                redo: { [weak self] in
-                    if let again = try? FileOperationService.createNewFile(
-                        in: parent, baseName: baseName,
-                        extension: ext, contents: contents
-                    ) {
-                        url = again
-                    }
-                    self?.reload()
-                }
-            )
+            let record = try TransferRecord(source: url, destination: url, move: false, backup: nil)
+            recordTransferUndo([record], move: false)
+
         } catch {
             reportOpError(error.localizedDescription)
         }
@@ -1043,34 +1022,13 @@ final class TabViewModel: ObservableObject, Identifiable {
         }
         let newName = resolvedName
         do {
-            let oldName = url.lastPathComponent
             let newURL = try FileOperationService.rename(url, to: newName)
             renamingItemID = nil
             reload()
             selectedIDs = [newURL]
-            // Capture the old name so undo can rename back. We track
-            // URLs across undo/redo with a mutable pair so chained
-            // undo↔redo cycles continue to work.
-            var current = (from: url, to: newURL, oldName: oldName, newName: newName)
-            recordUndoable(
-                actionName: "Rename",
-                undo: { [weak self] in
-                    guard let restored = try? FileOperationService.rename(current.to,
-                                                                          to: current.oldName) else { return }
-                    current = (from: current.to, to: restored,
-                               oldName: current.newName, newName: current.oldName)
-                    self?.reload()
-                    self?.selectedIDs = [restored]
-                },
-                redo: { [weak self] in
-                    guard let reapplied = try? FileOperationService.rename(current.to,
-                                                                           to: current.oldName) else { return }
-                    current = (from: current.to, to: reapplied,
-                               oldName: current.newName, newName: current.oldName)
-                    self?.reload()
-                    self?.selectedIDs = [reapplied]
-                }
-            )
+            let history = try RenameHistory([(url, newURL)])
+            recordUndoable(actionName: "Rename", undo: { try history.toggle() }, redo: { try history.toggle() })
+
         } catch {
             reportOpError(error.localizedDescription)
             renamingItemID = nil
@@ -1139,79 +1097,10 @@ final class TabViewModel: ObservableObject, Identifiable {
             if failedCount > 0 {
                 reportOpError("\(failedCount) item\(failedCount == 1 ? "" : "s") couldn't be moved to Trash (permission or in use).")
             }
-            // Capture the (original, trashed) pairs so undo can pull
-            // the items back out of Trash to where they came from.
-            // Items that couldn't be resolved to a trash URL (rare
-            // FS edge case) are dropped from the undo list — we
-            // can't restore what we can't locate.
-            // `var` (not `let`) so the redo closure can write the fresh
-            // trash URLs back — both closures capture the SAME variable,
-            // so a re-trash updates what the next undo restores.
-            var restorable = trashed.compactMap { pair -> (original: URL, trashed: URL)? in
-                guard let t = pair.trashed else { return nil }
-                return (pair.original, t)
-            }
-            if !restorable.isEmpty {
-                recordUndoable(
-                    actionName: "Move to Trash",
-                    undo: { [weak self] in
-                        var failures = 0
-                        for pair in restorable {
-                            // Re-create the original parent in case it
-                            // was deleted/renamed after trashing —
-                            // otherwise moveItem throws and the file is
-                            // stranded in Trash.
-                            let parent = pair.original.deletingLastPathComponent()
-                            try? FileManager.default.createDirectory(
-                                at: parent, withIntermediateDirectories: true)
-                            do {
-                                try FileManager.default.moveItem(at: pair.trashed,
-                                                                 to: pair.original)
-                            } catch {
-                                failures += 1
-                            }
-                        }
-                        // Surface partial failure rather than swallowing
-                        // it — a silent "⌘Z did nothing" looks like data
-                        // loss to the user.
-                        if failures > 0 {
-                            self?.reportOpError("Couldn't restore \(failures) item\(failures == 1 ? "" : "s") from Trash (original location unavailable).")
-                        }
-                        self?.reload()
-                    },
-                    redo: { [weak self] in
-                        // Re-trash the originals. macOS may append "2",
-                        // "3" on name collision, so re-capture the new
-                        // trash URLs into `restorable` for the next undo.
-                        // Entries that fail to re-trash keep their PREVIOUS
-                        // (original, trashed) pair so a later undo can
-                        // still try to restore them — dropping them would
-                        // silently orphan the item.
-                        var updated: [(original: URL, trashed: URL)] = []
-                        var failures = 0
-                        for pair in restorable {
-                            var result: NSURL?
-                            do {
-                                try FileManager.default.trashItem(at: pair.original,
-                                                                  resultingItemURL: &result)
-                                if let t = result as URL? {
-                                    updated.append((pair.original, t))
-                                } else {
-                                    updated.append(pair)   // keep last-known
-                                }
-                            } catch {
-                                updated.append(pair)        // keep last-known
-                                failures += 1
-                            }
-                        }
-                        restorable = updated
-                        if failures > 0 {
-                            self?.reportOpError("Couldn't move \(failures) item\(failures == 1 ? "" : "s") back to Trash.")
-                        }
-                        self?.reload()
-                    }
-                )
-            }
+            let history = TrashHistory(trashed)
+            recordUndoable(actionName: "Move to Trash", undo: { try history.apply(restore: true) },
+                           redo: { try history.apply(restore: false) })
+
         }
         reload()
     }
@@ -1258,7 +1147,6 @@ final class TabViewModel: ObservableObject, Identifiable {
         let resolver = ConflictPrompt.resolver()
 
         let start = Date()
-        let count = urls.count
         let verb = move ? "moved" : "copied"
         Task.detached(priority: .userInitiated) {
             let pairs = await FileOperationService.transfer(
@@ -1271,12 +1159,14 @@ final class TabViewModel: ObservableObject, Identifiable {
             let elapsed = Date().timeIntervalSince(start)
             await MainActor.run { [weak self] in
                 guard let self = self else { return }
-                if move { ClipboardService.shared.clear() }
+                if move && progress.succeeded == urls.count { ClipboardService.shared.clear() }
                 self.reload()
                 self.finishTransferSheet(progress)
                 self.recordTransferUndo(pairs, move: move)
+                let failed = progress.failedSources
+                self.retryOperation = failed.isEmpty ? nil : { [weak self] in self?.transferDropped(failed, to: destination, mode: move ? .move : .copy) }
                 NotificationService.notifyOperationCompleted(
-                    title: "\(verb.capitalized) \(count) item\(count == 1 ? "" : "s")",
+                    title: progress.isCancelled ? "Transfer cancelled" : "\(verb.capitalized) \(progress.succeeded) item(s)",
                     body: destination.lastPathComponent,
                     elapsed: elapsed,
                     tab: self
@@ -1298,47 +1188,18 @@ final class TabViewModel: ObservableObject, Identifiable {
     /// conflict was resolved as "Replace" are already excluded by
     /// `transfer` itself (see its doc comment) since reversing those
     /// would need to also restore whatever they overwrote.
-    private func recordTransferUndo(_ pairs: [(source: URL, destination: URL)], move: Bool) {
-        guard !pairs.isEmpty else { return }
-        recordUndoable(
-            actionName: move ? "Move" : "Copy",
-            undo: { [weak self] in
-                guard let self else { return }
-                if move {
-                    // Reverse the move: destination back to source.
-                    // Recreate the original parent in case it was
-                    // itself removed/renamed since — same defensive
-                    // pattern as Trash-restore below.
-                    for pair in pairs {
-                        let parent = pair.source.deletingLastPathComponent()
-                        try? FileManager.default.createDirectory(
-                            at: parent, withIntermediateDirectories: true)
-                        try? FileManager.default.moveItem(at: pair.destination, to: pair.source)
-                    }
-                } else {
-                    // Reverse a copy by trashing the fresh copy it made
-                    // — NOT permanent-delete, matching Duplicate/New
-                    // Folder/New File's undo, so the user has an out if
-                    // they change their mind again after undoing.
-                    _ = FileOperationService.moveToTrash(pairs.map(\.destination))
-                }
-                self.reload()
-            },
-            redo: { [weak self] in
-                guard let self else { return }
-                for pair in pairs {
-                    let parent = pair.destination.deletingLastPathComponent()
-                    try? FileManager.default.createDirectory(
-                        at: parent, withIntermediateDirectories: true)
-                    if move {
-                        try? FileManager.default.moveItem(at: pair.source, to: pair.destination)
-                    } else {
-                        try? FileManager.default.copyItem(at: pair.source, to: pair.destination)
-                    }
-                }
-                self.reload()
+    private func recordTransferUndo(_ records: [TransferRecord], move: Bool) {
+        guard !records.isEmpty else { return }
+        func apply(undo: Bool) throws {
+            var errors: [String] = []
+            let ordered = undo ? Array(records.reversed()) : records
+            for record in ordered {
+                do { if undo { try record.undo() } else { try record.redo() } }
+                catch { errors.append(error.localizedDescription) }
             }
-        )
+            if !errors.isEmpty { throw SafeFiles.error(errors.joined(separator: "\n")) }
+        }
+        recordUndoable(actionName: move ? "Move" : "Copy", undo: { try apply(undo: true) }, redo: { try apply(undo: false) })
     }
 
     // MARK: Batch rename
@@ -1353,72 +1214,72 @@ final class TabViewModel: ObservableObject, Identifiable {
     /// the second rename). Renaming everything to a unique temp name
     /// first eliminates that dependency.
     func applyBatchRename(_ mapping: [URL: String]) {
-        guard !hasActiveTransfer else {
-            reportOpError("Another file operation is in progress. Wait for it to finish.")
-            return
-        }
-        // Drive a progress sheet — a 200-file rename used to freeze the
-        // main thread for several seconds while every `moveItem` ran
-        // synchronously. The 2-pass logic moves to a detached task so
-        // the UI stays responsive and the user gets a live counter.
+        guard !hasActiveTransfer, !mapping.isEmpty else { return }
+        let plan = mapping.map { ($0.key, $0.key.deletingLastPathComponent().appendingPathComponent($0.value)) }
+        // Validate BEFORE moving any source to a temporary name.
+        do { for name in mapping.values { try SafeFiles.validateName(name) } }
+        catch { reportOpError(error.localizedDescription); return }
         let progress = FileOperationProgress()
-        progress.total = mapping.count * 2
-        progress.currentFileName = "Renaming…"
+        progress.total = mapping.count
         beginTransferSheet(progress)
-
         Task.detached(priority: .userInitiated) {
-            var tempMap: [(original: URL, temp: URL, finalName: String)] = []
             var errors: [String] = []
-
-            // Pass 1: stage every source under a UUID temp name so the
-            // final targets become free regardless of ordering.
-            for (url, newName) in mapping {
-                let tempName = ".__fe_rename_\(UUID().uuidString)"
+            var history: RenameHistory?
+            do {
+                try await OperationQueue.shared.acquire(progress.control)
                 do {
-                    let tempURL = try FileOperationService.rename(url, to: tempName)
-                    tempMap.append((original: url, temp: tempURL, finalName: newName))
-                } catch {
-                    errors.append("\(url.lastPathComponent): \(error.localizedDescription)")
-                }
-                await MainActor.run {
-                    progress.processed += 1
-                    progress.currentFileName = url.lastPathComponent
-                }
-            }
-
-            // Pass 2: temp → final.
-            for entry in tempMap {
-                do {
-                    _ = try FileOperationService.rename(entry.temp, to: entry.finalName)
-                } catch {
-                    errors.append("\(entry.original.lastPathComponent) → \(entry.finalName): \(error.localizedDescription)")
-                    // Roll back to the original visible name — otherwise
-                    // the file is stranded under the hidden `.__fe_rename`
-                    // temp name and vanishes from the listing.
-                    _ = try? FileOperationService.rename(entry.temp, to: entry.original.lastPathComponent)
-                }
-                await MainActor.run {
-                    progress.processed += 1
-                    progress.currentFileName = entry.finalName
-                }
-            }
-
-            // Snapshot the final error list before the @Sendable hand-
-            // off so Swift 6 strict concurrency doesn't complain about
-            // a captured `var` crossing actor boundaries.
+                    try BatchRenamer.apply(plan, control: progress.control)
+                    history = try RenameHistory(plan)
+                } catch { errors.append(error.localizedDescription) }
+                await OperationQueue.shared.release()
+            } catch is CancellationError { }
+            catch { errors.append(error.localizedDescription) }
             let finalErrors = errors
-            await MainActor.run { [weak self, finalErrors] in
-                guard let self = self else { return }
-                if !finalErrors.isEmpty {
-                    let preview = finalErrors.prefix(5).joined(separator: "\n")
-                    let extra = finalErrors.count > 5 ? "\n…and \(finalErrors.count - 5) more." : ""
-                    self.reportOpError(preview + extra)
-                    progress.errorMessage = preview + extra
+            let completedHistory = history
+            await MainActor.run {
+                if let history = completedHistory {
+                    self.recordUndoable(actionName: "Batch Rename", undo: { try history.toggle() }, redo: { try history.toggle() })
+                    progress.processed = mapping.count; progress.succeeded = mapping.count
                 }
-                progress.isDone = true
-                self.reload()
-                self.finishTransferSheet(progress)
+                progress.finish(errors: finalErrors)
+                self.reload(); self.finishTransferSheet(progress)
             }
+        }
+    }
+
+    func browseArchive(_ archive: URL) {
+        guard !hasActiveTransfer else { return }
+        Task { [weak self] in
+            let result = await Task.detached(priority: .utility) { Result { try ArchiveService.list(archive) } }.value
+            guard let self else { return }
+            do {
+                let entries = try result.get()
+                let alert = NSAlert()
+                alert.messageText = archive.lastPathComponent
+                alert.informativeText = "\(entries.count) entries. Select files/folders to extract into a new folder. Links and special files are rejected."
+                let stack = NSStackView(); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 4
+                let visible = Array(entries.prefix(2000))
+                let buttons = visible.map { entry -> NSButton in
+                    let button = NSButton(checkboxWithTitle: entry.id, target: nil, action: nil)
+                    button.state = .on; stack.addArrangedSubview(button); return button
+                }
+                if entries.count > visible.count { stack.addArrangedSubview(NSTextField(labelWithString: "Showing the first 2,000 entries. Extract All includes the rest.")) }
+                let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 540, height: 300))
+                scroll.hasVerticalScroller = true; scroll.documentView = stack
+                stack.frame = NSRect(x: 0, y: 0, width: 520, height: max(300, stack.fittingSize.height))
+                alert.accessoryView = scroll
+                alert.addButton(withTitle: "Extract Selected"); alert.addButton(withTitle: "Extract All"); alert.addButton(withTitle: "Cancel")
+                let response = alert.runModal()
+                guard response == .alertFirstButtonReturn || response == .alertSecondButtonReturn else { return }
+                let selected = response == .alertFirstButtonReturn ? Set(zip(visible, buttons).filter { $0.1.state == .on }.map { $0.0.id }) : nil
+                if let selected, selected.isEmpty { return }
+                guard !self.hasActiveTransfer else { return }
+                let progress = FileOperationProgress(); self.beginTransferSheet(progress)
+                Task.detached(priority: .userInitiated) {
+                    await ArchiveService.extract([archive], progress: progress, selected: selected)
+                    await MainActor.run { self.reload(); self.finishTransferSheet(progress) }
+                }
+            } catch { self.reportOpError(error.localizedDescription) }
         }
     }
 
@@ -1447,26 +1308,22 @@ final class TabViewModel: ObservableObject, Identifiable {
     /// Supports `.zip`, `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz`,
     /// `.tar.xz`/`.txz`. ArchiveService handles the dispatch.
     func extractSelection() {
-        let supportedSuffixes = [".zip", ".tar", ".tar.gz", ".tgz",
-                                  ".tar.bz2", ".tbz", ".tar.xz", ".txz"]
-        let urls = selectedURLs.filter { url in
-            let name = url.lastPathComponent.lowercased()
-            return supportedSuffixes.contains { name.hasSuffix($0) }
-        }
+        extractArchives(selectedURLs.filter { ArchiveService.supports($0) })
+    }
+    private func extractArchives(_ urls: [URL]) {
         guard !urls.isEmpty else { return }
         guard !hasActiveTransfer else {
             reportOpError("Another file operation is in progress. Wait for it to finish.")
             return
         }
-        let progress = FileOperationProgress()
-        beginTransferSheet(progress)
+        let progress = FileOperationProgress(); beginTransferSheet(progress)
         Task.detached(priority: .userInitiated) {
-            for url in urls {
-                await ArchiveService.extract(url, progress: progress)
-            }
+            await ArchiveService.extract(urls, progress: progress)
             await MainActor.run { [weak self] in
-                self?.reload()
-                self?.finishTransferSheet(progress)
+                guard let self else { return }
+                self.reload(); self.finishTransferSheet(progress)
+                let failed = progress.failedSources
+                self.retryOperation = failed.isEmpty ? nil : { [weak self] in self?.extractArchives(failed) }
             }
         }
     }
@@ -1496,7 +1353,7 @@ final class TabViewModel: ObservableObject, Identifiable {
         // the GRABBED item; expanded members may already live in (or BE)
         // the destination.
         sources = sources.filter {
-            $0 != destination && $0.deletingLastPathComponent() != destination
+            $0 != destination && (mode == .copy || $0.deletingLastPathComponent() != destination)
         }
         guard !sources.isEmpty else { return }
         guard !hasActiveTransfer else {
@@ -1523,6 +1380,8 @@ final class TabViewModel: ObservableObject, Identifiable {
                 self?.reload()
                 self?.finishTransferSheet(progress)
                 self?.recordTransferUndo(pairs, move: move)
+                let failed = progress.failedSources
+                self?.retryOperation = failed.isEmpty ? nil : { [weak self] in self?.transferDropped(failed, to: destination, mode: move ? .move : .copy) }
             }
         }
     }

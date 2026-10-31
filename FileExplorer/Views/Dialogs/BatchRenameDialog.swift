@@ -248,17 +248,24 @@ struct BatchRenameDialog: View {
             // Batch conflict: two items renamed to the same name in the
             // same parent folder.
             var batchNames = seenInBatch[parent] ?? []
-            let conflictsWithBatch = !batchNames.insert(next).inserted
+            let volumeCaseSensitive = (try? url.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey]))?.volumeSupportsCaseSensitiveNames ?? false
+            let batchKey = volumeCaseSensitive ? next : next.folding(options: [.caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            let conflictsWithBatch = !batchNames.insert(batchKey).inserted
             seenInBatch[parent] = batchNames
             // Disk conflict: an unrelated existing file already has
             // that name — but a file mapping to its OWN current name
             // doesn't count (we'll just skip the rename in apply).
             let existing = existingNamesByParent[parent] ?? []
             let originalSelf = originalNamesByURL[url]
-            let conflictsWithDisk = existing.contains(next) && next != originalSelf
+            let caseSensitive = (try? url.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey]))?.volumeSupportsCaseSensitiveNames ?? false
+            func folded(_ value: String) -> String { caseSensitive ? value : value.folding(options: [.caseInsensitive], locale: Locale(identifier: "en_US_POSIX")) }
+            let selectedNames = Set(urls.filter { $0.deletingLastPathComponent().path == parent }.map { folded($0.lastPathComponent) })
+            let conflictsWithDisk = existing.contains { folded($0) == folded(next) && !selectedNames.contains(folded($0)) }
+            let invalidName = (try? SafeFiles.validateName(next)) == nil
+            _ = originalSelf
             pairs.append(PreviewPair(
                 url: url, oldName: old, newName: next,
-                hasConflict: conflictsWithBatch || conflictsWithDisk
+                hasConflict: conflictsWithBatch || conflictsWithDisk || invalidName
             ))
         }
         return pairs

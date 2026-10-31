@@ -138,7 +138,7 @@ struct PreviewPane: View {
     @ViewBuilder
     private func sizeRow(for url: URL, bytes: Int64) -> some View {
         if let cached = FolderSizeService.shared.cachedSize(of: url) {
-            Text(ByteCountFormatter.string(fromByteCount: cached, countStyle: .file))
+            Text(FolderSizeService.shared.summary(of: url) ?? ByteCountFormatter.string(fromByteCount: cached, countStyle: .file))
                 .font(.callout.bold())
                 .foregroundStyle(.primary)
         } else if isCalculatingBytes {

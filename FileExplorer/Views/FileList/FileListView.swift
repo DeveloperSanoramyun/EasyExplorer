@@ -72,7 +72,7 @@ struct FileListView: View {
                 Text(err)
             } actions: {
                 Button("Open System Settings") {
-                    PermissionGuide.openFullDiskAccessSettings()
+                    PermissionGuide.openFilesAndFoldersSettings()
                 }
                 .buttonStyle(.borderedProminent)
             }
@@ -272,6 +272,7 @@ struct DetailsTableView: View {
             }
         }
         .onAppear { restoreColumnCustomization() }
+        .onChange(of: columnCustomizationData) { _, _ in restoreColumnCustomization() }
         .onChange(of: columnCustomization) { _, newValue in
             persistColumnCustomization(newValue)
         }
@@ -428,6 +429,10 @@ struct DetailsTableView: View {
             sortBySubmenu
             viewBySubmenu
             Divider()
+            Button("Retry Failed Items") { tab.retryFailedOperation() }
+                .disabled(!tab.canRetryOperation)
+            Button("Last Operation Results…") { tab.showOperationResults() }
+                .disabled(!tab.hasOperationResults || tab.hasActiveTransfer)
             Button("Refresh") { tab.reload() }
             Button("Get Info") {
                 NotificationCenter.default.post(name: .feShowProperties, object: nil)
@@ -435,6 +440,7 @@ struct DetailsTableView: View {
             .keyboardShortcut("i", modifiers: .command)
         } else {
             Button("Open") { openSelection(selection) }
+            browserEnhancedActions(for: selection, tab: tab)
             // "Open With…" — only meaningful for a single, non-directory
             // selection. macOS reports per-UTI handlers; mixed selections
             // would need intersection logic that doesn't add real value.
@@ -710,8 +716,13 @@ struct DetailsTableView: View {
     /// first appearance. Silently ignores decode failures — a corrupt
     /// blob just resets to defaults instead of crashing.
     private func restoreColumnCustomization() {
-        guard !columnCustomizationData.isEmpty,
-              let decoded = try? JSONDecoder().decode(
+        if columnCustomizationData.isEmpty {
+            var defaults = TableColumnCustomization<FileItem>()
+            for id in ["dateCreated", "dateAccessed", "extension", "tags", "parentPath", "originalLocation"] { defaults[visibility: id] = .hidden }
+            columnCustomization = defaults
+            return
+        }
+        guard let decoded = try? JSONDecoder().decode(
                 TableColumnCustomization<FileItem>.self,
                 from: columnCustomizationData
               ) else { return }

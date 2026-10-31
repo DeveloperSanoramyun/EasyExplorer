@@ -17,6 +17,7 @@ import SwiftUI   // NSHostingView for the conflict alert's comparison accessory
 enum ConflictDecision {
     case skip
     case replace
+    case merge
     case keepBoth      // appends " (copy)" / " (copy 2)" / ...
     case cancel        // abort the whole batch
 }
@@ -35,6 +36,7 @@ typealias ConflictResolver = (_ source: URL, _ destination: URL) async -> (decis
 /// repro is ⌘C then ⌘V in the same folder (the pasted name instantly
 /// collides with the original). `NSAlert.runModal()` floats above the
 /// progress sheet, so it always shows.
+#if !CORE_TESTS
 @MainActor
 enum ConflictPrompt {
     static func resolver() -> ConflictResolver {
@@ -61,6 +63,11 @@ enum ConflictPrompt {
                     height: max(90, comparison.fittingSize.height))
                 alert.accessoryView = comparison
 
+                let canMerge = FileSystemService.isReadableDirectory(source)
+                    && FileSystemService.isReadableDirectory(destination)
+                    && (try? source.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink != true
+                    && (try? destination.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink != true
+                if canMerge { alert.addButton(withTitle: "Merge Folders") }
                 let response = alert.runModal()
                 let applyToAll = (alert.suppressionButton?.state == .on)
                 let decision: ConflictDecision
@@ -68,6 +75,7 @@ enum ConflictPrompt {
                 case .alertFirstButtonReturn:  decision = .replace
                 case .alertSecondButtonReturn: decision = .keepBoth
                 case .alertThirdButtonReturn:  decision = .skip
+                case NSApplication.ModalResponse(rawValue: 1004): decision = .merge
                 default:                       decision = .cancel
                 }
                 return (decision: decision, applyToAll: applyToAll)
@@ -75,6 +83,8 @@ enum ConflictPrompt {
         }
     }
 }
+
+#endif
 
 // MARK: - Progress
 
@@ -86,6 +96,39 @@ final class FileOperationProgress: ObservableObject {
     @Published var isCancelled: Bool = false
     @Published var isDone: Bool = false
     @Published var errorMessage: String? = nil
+    @Published var resultMessages: [String] = []
+    @Published var succeeded: Int = 0
+    @Published var skipped: Int = 0
+    @Published var failedSources: [URL] = []
+    @Published var completedBytes: Int64 = 0
+    @Published var totalBytes: Int64 = 0
+    @Published var availableBytes: Int64? = nil
+    nonisolated let control = OperationControl()
+    private var sampler: Task<Void, Never>?
+    var bytesPerSecond: Double? {
+        guard let startedAt else { return nil }
+        let elapsed = Date().timeIntervalSince(startedAt)
+        return elapsed > 1 && completedBytes > 0 ? Double(completedBytes) / elapsed : nil
+    }
+    func startSampling() {
+        startedAt = Date()
+        sampler = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                guard let self, !Task.isCancelled else { return }
+                let bytes = self.control.bytes
+                self.completedBytes = bytes.done; self.totalBytes = bytes.total
+                if self.isDone { return }
+            }
+        }
+    }
+    func finish(errors: [String]) {
+        sampler?.cancel(); sampler = nil
+        let bytes = control.bytes; completedBytes = bytes.done; totalBytes = bytes.total
+        resultMessages += errors
+        errorMessage = errors.isEmpty ? nil : errors.joined(separator: "\n")
+        currentFileName = ""; isDone = true
+    }
 
     /// Set when the transfer actually begins (first processed item),
     /// so the rate / ETA estimates don't include the user's "Apply to
@@ -93,7 +136,8 @@ final class FileOperationProgress: ObservableObject {
     private var startedAt: Date? = nil
 
     func fraction(at now: Date = Date()) -> Double {
-        total > 0 ? Double(processed) / Double(total) : 0
+        if totalBytes > 0 { return min(1, Double(completedBytes) / Double(totalBytes)) }
+        return total > 0 ? Double(processed) / Double(total) : 0
     }
     var fraction: Double { fraction() }
 
@@ -123,8 +167,11 @@ final class FileOperationProgress: ObservableObject {
         processed += 1
     }
 
-    func cancel() { isCancelled = true }
+    func cancel() { isCancelled = true; control.cancel() }
     func reset() {
+        sampler?.cancel(); sampler = nil
+        resultMessages = []; succeeded = 0; skipped = 0
+        completedBytes = 0; totalBytes = 0
         currentFileName = ""
         processed = 0
         total = 0
@@ -154,6 +201,9 @@ enum FileOperationService {
             do {
                 try FileManager.default.trashItem(at: url, resultingItemURL: &result)
                 trashed.append((url, result as URL?))
+                #if !CORE_TESTS
+                if let trash = result as URL? { TrashService.remember(original: url, trash: trash) }
+                #endif
             } catch {
                 // Continue on partial failure — Finder behaves the same way.
                 NSLog("trash failed for \(url.path): \(error)")
@@ -197,10 +247,22 @@ enum FileOperationService {
                 NSLocalizedDescriptionKey: "Name cannot contain \u{201C}/\u{201D}."
             ])
         }
+        try SafeFiles.validateName(trimmed)
         let parent = url.deletingLastPathComponent()
         let newURL = parent.appendingPathComponent(trimmed)
         guard newURL.path != url.path else { return url }
-        if FileManager.default.fileExists(atPath: newURL.path) {
+        if SafeFiles.sameItem(url, newURL) {
+            let temporary = parent.appendingPathComponent(".__fe_rename_" + UUID().uuidString)
+            try FileManager.default.moveItem(at: url, to: temporary)
+            do { try FileManager.default.moveItem(at: temporary, to: newURL) }
+            catch {
+                do { try FileManager.default.moveItem(at: temporary, to: url) }
+                catch { throw SafeFiles.error("Rename recovery item: \(temporary.path)") }
+                throw error
+            }
+            return newURL
+        }
+        if SafeFiles.exists(newURL) {
             throw NSError(domain: "FileExplorer", code: 3, userInfo: [
                 NSLocalizedDescriptionKey: "An item named \u{201C}\(trimmed)\u{201D} already exists."
             ])
@@ -264,7 +326,9 @@ enum FileOperationService {
             idx += 1
             if idx > 1000 { break }
         }
-        guard fm.createFile(atPath: attempt.path, contents: contents ?? Data(), attributes: nil) else {
+        do {
+            try (contents ?? Data()).write(to: attempt, options: .withoutOverwriting)
+        } catch {
             throw NSError(domain: "FileExplorer", code: 10, userInfo: [
                 NSLocalizedDescriptionKey: "Could not create \u{201C}\(attempt.lastPathComponent)\u{201D}."
             ])
@@ -274,134 +338,168 @@ enum FileOperationService {
 
     // MARK: Copy / Move
 
-    /// Copy or move a batch with progress reporting and conflict prompts.
-    /// Runs on a detached task. Caller observes `progress` on the main thread.
-    /// `move == true` deletes the source after a successful copy.
-    ///
-    /// Returns the (source, actual-destination) pairs for items that
-    /// transferred WITHOUT overwriting anything — i.e. everything except
-    /// a "Replace" conflict resolution. Callers use this to build Undo:
-    /// a plain copy/move/keep-both is safely reversible (delete the copy,
-    /// or move the moved item back); a Replace isn't, without ALSO
-    /// restoring whatever it overwrote, which this doesn't attempt — an
-    /// undone batch that included a Replace just leaves those items
-    /// alone rather than pretending to reverse something it can't.
+    /// Staging and committing are separate: failed/cancelled copies cannot
+    /// damage an existing destination. All windows share the operation queue.
     @discardableResult
     static func transfer(
-        _ sources: [URL],
-        to destinationFolder: URL,
-        move: Bool,
-        progress: FileOperationProgress,
-        resolver: @escaping ConflictResolver
-    ) async -> [(source: URL, destination: URL)] {
-        await MainActor.run {
-            progress.reset()
-            progress.total = sources.count
-        }
-
-        var blanketDecision: ConflictDecision? = nil
-        // Accumulate per-item failures so a multi-file batch reports
-        // EVERY failure, not just the last one to write `errorMessage`.
+        _ sources: [URL], to destinationFolder: URL, move: Bool,
+        progress: FileOperationProgress, resolver: @escaping ConflictResolver
+    ) async -> [TransferRecord] {
+        let capacity = try? destinationFolder.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage
+        await MainActor.run { progress.total = sources.count; progress.availableBytes = capacity; progress.startSampling() }
+        let control = progress.control
+        var records: [TransferRecord] = []
         var errors: [String] = []
-        var transferred: [(source: URL, destination: URL)] = []
-
-        // Labelled so `.cancel` in the inner switch can abort the whole
-        // batch — a bare `break` only escapes the switch and falls through
-        // into the copy/move below, which is what the previous version did
-        // by accident.
-        batchLoop: for source in sources {
-            if await MainActor.run(body: { progress.isCancelled }) { break }
+        do {
+            await MainActor.run { progress.currentFileName = "Waiting for other file operations…" }
+            try await OperationQueue.shared.acquire(control)
+        } catch {
+            await MainActor.run { progress.finish(errors: []) }
+            return []
+        }
+        for source in sources {
+            if control.isCancelled { break }
+            do { control.plan(try SafeFiles.logicalSize(source, control: control)) }
+            catch { /* The item operation below reports the concrete failure. */ }
+        }
+        var blanket: ConflictDecision?
+        for source in sources {
+            if control.isCancelled { break }
             await MainActor.run { progress.currentFileName = source.lastPathComponent }
-
-            var destination = destinationFolder.appendingPathComponent(source.lastPathComponent)
-            // Set in the `.replace` branch below — excludes this item
-            // from the returned (undoable) pairs. See the doc comment.
-            var wasReplace = false
-
-            // Bail on placing a folder inside itself (or into one of its
-            // own descendants). Move would create an infinite loop on
-            // disk; copy would either fail or recurse the freshly-
-            // created destination back into itself, depending on
-            // FileManager's exact traversal order — neither is
-            // recoverable so we just refuse up front.
-            if source == destinationFolder
-                || destination.path.hasPrefix(source.path + "/") {
-                let verb = move ? "move" : "copy"
-                await MainActor.run {
-                    progress.errorMessage = "Cannot \(verb) \u{201C}\(source.lastPathComponent)\u{201D} into itself."
-                }
-                break batchLoop
-            }
-
-            if FileManager.default.fileExists(atPath: destination.path) {
-                let decision: ConflictDecision
-                if let cached = blanketDecision {
-                    decision = cached
-                } else {
-                    let response = await resolver(source, destination)
-                    decision = response.decision
-                    if response.applyToAll { blanketDecision = response.decision }
-                }
-                switch decision {
-                case .skip:
-                    await MainActor.run { progress.processed += 1 }
-                    continue
-                case .cancel:
-                    await MainActor.run { progress.isCancelled = true }
-                    break batchLoop
-                case .replace:
-                    // Report (don't swallow) a removal failure — otherwise
-                    // the following move/copy throws a misleading
-                    // "file already exists" instead of the real
-                    // permission/lock cause, and the user's Replace
-                    // silently no-ops.
-                    do {
-                        try FileManager.default.removeItem(at: destination)
-                    } catch {
-                        errors.append("\(destination.lastPathComponent): couldn't replace — \(error.localizedDescription)")
-                        await MainActor.run { progress.processed += 1 }
-                        continue
-                    }
-                    wasReplace = true
-                case .keepBoth:
-                    destination = uniquify(destination)
-                }
-            }
-
             do {
-                if move {
-                    try FileManager.default.moveItem(at: source, to: destination)
-                } else {
-                    try FileManager.default.copyItem(at: source, to: destination)
-                }
-                if !wasReplace {
-                    transferred.append((source: source, destination: destination))
-                }
-            } catch {
+                try await transferOne(source, to: destinationFolder.appendingPathComponent(source.lastPathComponent),
+                                      move: move, progress: progress, resolver: resolver,
+                                      blanket: &blanket, records: &records)
+            } catch is CancellationError { break }
+            catch {
                 errors.append("\(source.lastPathComponent): \(error.localizedDescription)")
+                await MainActor.run { progress.failedSources.append(source) }
             }
             await MainActor.run { progress.processed += 1 }
         }
-
-        // Snapshot into a `let` before the @Sendable hand-off — the loop
-        // above has already finished mutating `errors` by this point, but
-        // Swift 6's strict concurrency checker can't prove that from a
-        // captured `var`, so it flags the closure below as unsound
-        // (matches the same fix already applied in TabViewModel's batch
-        // rename).
+        await OperationQueue.shared.release()
         let finalErrors = errors
-        await MainActor.run {
-            progress.currentFileName = ""
-            // Surface every failure, capped so a huge failed batch
-            // doesn't produce an unreadable wall of text.
-            if !finalErrors.isEmpty {
-                let preview = finalErrors.prefix(8).joined(separator: "\n")
-                let extra = finalErrors.count > 8 ? "\n…and \(finalErrors.count - 8) more." : ""
-                progress.errorMessage = preview + extra
+        await MainActor.run { progress.finish(errors: finalErrors) }
+        return records
+    }
+
+    private static func transferOne(_ source: URL, to proposed: URL, move: Bool,
+                                    progress: FileOperationProgress, resolver: @escaping ConflictResolver,
+                                    blanket: inout ConflictDecision?, records: inout [TransferRecord]) async throws {
+        let control = progress.control
+        try control.check()
+        let originalIdentity = try FileSnapshot(source, control: control)
+        var destination = proposed
+        let directory = (try? source.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]))
+        if SafeFiles.sameItem(source, destination) {
+            if move {
+                await MainActor.run { progress.skipped += 1; progress.resultMessages.append("Unchanged: \(source.path)") }
+                return
             }
-            progress.isDone = true
+            destination = SafeFiles.unique(destination.deletingLastPathComponent().appendingPathComponent(
+                source.deletingPathExtension().lastPathComponent + " (copy)" + (source.pathExtension.isEmpty ? "" : "." + source.pathExtension)))
         }
-        return transferred
+        if directory?.isDirectory == true, directory?.isSymbolicLink != true,
+           SafeFiles.isInside(destination.deletingLastPathComponent(), source) {
+            throw SafeFiles.error("Cannot transfer a folder into itself, including through a link.")
+        }
+        var expected = try? FileIdentity(destination)
+        if expected != nil {
+            let decision: ConflictDecision
+            if let blanket { decision = blanket }
+            else {
+                let response = await resolver(source, destination)
+                decision = response.decision
+                if response.applyToAll, response.decision != .merge { blanket = response.decision }
+            }
+            try control.check()
+            switch decision {
+            case .cancel: await MainActor.run { progress.cancel() }; throw CancellationError()
+            case .skip:
+                await MainActor.run { progress.skipped += 1; progress.resultMessages.append("Skipped: \(source.path)") }
+                return
+            case .keepBoth: destination = SafeFiles.unique(destination); expected = nil
+            case .replace: break
+            case .merge:
+                guard directory?.isDirectory == true, directory?.isSymbolicLink != true,
+                      (try destination.resourceValues(forKeys: [.isDirectoryKey])).isDirectory == true,
+                      (try destination.resourceValues(forKeys: [.isSymbolicLinkKey])).isSymbolicLink != true else {
+                    throw SafeFiles.error("Merge requires two real folders.")
+                }
+                let children = try FileManager.default.contentsOfDirectory(at: source, includingPropertiesForKeys: nil)
+                for child in children {
+                    try await transferOne(child, to: destination.appendingPathComponent(child.lastPathComponent),
+                                          move: move, progress: progress, resolver: resolver,
+                                          blanket: &blanket, records: &records)
+                }
+                // Keep the source directory so Undo always has a stable parent.
+                return
+            }
+        }
+        let fm = FileManager.default
+        let workspace = try SafeFiles.privateDirectory(in: destination.deletingLastPathComponent())
+        let staged = workspace.appendingPathComponent("incoming")
+        defer {
+            // Never remove a previous target preserved after a failed commit.
+            if !SafeFiles.exists(workspace.appendingPathComponent("previous")) { try? fm.removeItem(at: workspace) }
+        }
+        // Same-volume moves can commit by rename: no duplicate data and
+        // no long uncancellable recursive removal. Replacement still retains
+        // its old target in the private recovery directory.
+        if move, let parentIdentity = try? FileIdentity(destination.deletingLastPathComponent()),
+           parentIdentity.device == originalIdentity.entries[""]?.device {
+            try control.check()
+            let backup = try MutationLock.withLock {
+                guard try FileSnapshot(source, control: control) == originalIdentity else { throw SafeFiles.error("Source changed; move was not performed.") }
+                return try SafeFiles.install(source, at: destination, replacing: expected, workspace: workspace)
+            }
+            let record = try TransferRecord(source: source, destination: destination, move: true, backup: backup)
+            records.append(record)
+            control.add((try? SafeFiles.logicalSize(destination, control: OperationControl())) ?? 0)
+            let actual = destination
+            await MainActor.run {
+                progress.succeeded += 1; progress.resultMessages.append("Moved: \(actual.path)")
+                if let backup { progress.resultMessages.append("Previous item preserved: \(backup.path)") }
+            }
+            return
+        }
+        try SafeFiles.copy(source, to: staged, control: control)
+        try control.check()
+        guard try FileSnapshot(source, control: control) == originalIdentity else { throw SafeFiles.error("Source changed during transfer; destination was not changed.") }
+        var retiredSource: URL?
+        if move {
+            retiredSource = try MutationLock.withLock {
+                guard try FileSnapshot(source, control: control) == originalIdentity else { throw SafeFiles.error("Source changed; source was preserved.") }
+                let retired = try SafeFiles.retire(source)
+                do {
+                    guard try FileSnapshot(retired, control: control) == originalIdentity else { throw SafeFiles.error("Source changed during retirement.") }
+                } catch {
+                    do { try fm.moveItem(at: retired, to: source) }
+                    catch { throw SafeFiles.error("Source recovery required at \(retired.path)") }
+                    throw error
+                }
+                return retired
+            }
+        }
+        let backup: URL?
+        do {
+            backup = try SafeFiles.install(staged, at: destination, replacing: expected, workspace: workspace)
+        } catch {
+            if let retiredSource {
+                do { try fm.moveItem(at: retiredSource, to: source) }
+                catch { throw SafeFiles.error("Source recovery required at \(retiredSource.path). Destination recovery: \(workspace.path)") }
+            }
+            throw error
+        }
+        let record = try TransferRecord(source: source, destination: destination, move: move, backup: backup)
+        records.append(record)
+        let actual = destination
+        let preservedSource = retiredSource
+        await MainActor.run {
+            progress.succeeded += 1; progress.resultMessages.append("Transferred: \(actual.path)")
+            if let backup { progress.resultMessages.append("Previous item preserved: \(backup.path)") }
+            if let preservedSource { progress.resultMessages.append("Source recovery copy: \(preservedSource.path)") }
+        }
     }
 
     // MARK: Helpers

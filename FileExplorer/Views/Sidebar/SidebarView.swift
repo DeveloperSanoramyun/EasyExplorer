@@ -212,6 +212,10 @@ struct SidebarView: View {
     @ViewBuilder
     private var trashSection: some View {
         Section {
+            ForEach(rootStore.externalTrash, id: \.self) { url in
+                SidebarItem(url: url, displayName: "Trash — " + url.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent,
+                            symbol: "trash", symbolColor: .secondary, tab: tab)
+            }
             SidebarItem(
                 url: rootStore.trashURL,
                 displayName: "Trash",
@@ -420,6 +424,7 @@ private struct SidebarFolderRow: View {
 private final class SidebarRootStore: ObservableObject {
     @Published private(set) var macRoots: [FolderNode] = []
     let trashURL: URL
+    @Published var externalTrash: [URL] = []
 
     private var mountObservers: [NSObjectProtocol] = []
     private var activationObserver: NSObjectProtocol?
@@ -474,6 +479,12 @@ private final class SidebarRootStore: ObservableObject {
     }
 
     private func rebuildRoots() {
+        let uid = String(getuid())
+        externalTrash = (FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: nil, options: [.skipHiddenVolumes]) ?? [])
+            .filter { $0.path != "/" }
+            .map { $0.appendingPathComponent(".Trashes/" + uid) }
+            .filter { FileSystemService.isReadableDirectory($0) }
+
         let fm = FileManager.default
         var roots: [FolderNode] = [
             FolderNode(url: URL(fileURLWithPath: "/"),

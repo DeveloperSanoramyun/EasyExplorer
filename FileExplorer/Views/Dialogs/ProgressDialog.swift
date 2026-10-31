@@ -20,7 +20,7 @@ struct ProgressDialog: View {
                 Image(systemName: progress.errorMessage == nil ? "doc.on.doc" : "exclamationmark.triangle")
                     .feFont(size: 22)
                     .foregroundStyle(.tint)
-                Text(titleOverride ?? (progress.isDone ? "Done" : "Copying…"))
+                Text(titleOverride ?? (progress.isDone ? (progress.isCancelled ? "Cancelled" : "Done") : "File operation…"))
                     .font(.headline)
                 Spacer()
             }
@@ -30,7 +30,7 @@ struct ProgressDialog: View {
 
             HStack {
                 Text(progress.isDone
-                     ? (progress.errorMessage == nil ? "Completed." : "Finished with errors.")
+                     ? (progress.isCancelled ? "Cancelled; completed items are preserved." : (progress.errorMessage == nil ? "Completed." : "Finished with errors."))
                      : progress.currentFileName)
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -43,10 +43,21 @@ struct ProgressDialog: View {
                     .foregroundStyle(.secondary)
             }
 
+            if let capacity = progress.availableBytes {
+                Text("Available space: \(ByteCountFormatter.string(fromByteCount: capacity, countStyle: .file))").font(.caption)
+            }
+            if progress.totalBytes > 0 {
+                Text("\(ByteCountFormatter.string(fromByteCount: progress.completedBytes, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: progress.totalBytes, countStyle: .file))")
+                    .font(.caption.monospacedDigit())
+            }
+            if let rate = progress.bytesPerSecond, !progress.isDone {
+                Text("\(ByteCountFormatter.string(fromByteCount: Int64(rate), countStyle: .file))/sec · ETA \(formattedETA(Double(max(0, progress.totalBytes - progress.completedBytes)) / rate))")
+                    .font(.caption.monospacedDigit())
+            }
             // Rate + ETA — only appears once the transfer has been
             // running long enough to compute a stable estimate, so a
             // 3-file copy doesn't flash misleading numbers.
-            if !progress.isDone,
+            if progress.totalBytes == 0, !progress.isDone,
                let rate = progress.itemsPerSecond,
                let eta = progress.etaSeconds {
                 HStack {
@@ -58,11 +69,15 @@ struct ProgressDialog: View {
                 .foregroundStyle(.tertiary)
             }
 
-            if let err = progress.errorMessage {
-                Text(err)
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .lineLimit(3)
+            if progress.isDone {
+                Text("Succeeded: \(progress.succeeded) · Skipped: \(progress.skipped)").font(.caption)
+                if !progress.resultMessages.isEmpty {
+                    ScrollView {
+                        Text(progress.resultMessages.joined(separator: "\n"))
+                            .font(.caption).textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }.frame(maxHeight: 160)
+                }
             }
 
             HStack {

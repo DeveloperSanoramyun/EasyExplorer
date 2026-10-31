@@ -369,7 +369,7 @@ struct PropertiesDialog: View {
     private var sizeText: String {
         if values?.isDirectory == true && values?.isPackage == false {
             if let cached = FolderSizeService.shared.cachedSize(of: url) {
-                return ByteCountFormatter.string(fromByteCount: cached, countStyle: .file)
+                return FolderSizeService.shared.summary(of: url) ?? ByteCountFormatter.string(fromByteCount: cached, countStyle: .file)
             }
             return "Use \u{201C}Calculate Size\u{201D} to compute"
         }

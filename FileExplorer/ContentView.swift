@@ -63,6 +63,13 @@ struct ContentView: View {
 
     var body: some View {
         splitView
+            .onOpenURL { url in
+                // Explicit folder opens from other apps (e.g. Hanja).
+                // Reject remote URLs and leave invalid paths to navigate's
+                // normal error reporting instead of launching another app.
+                guard url.isFileURL else { return }
+                window.activeTab.navigate(to: url.standardizedFileURL)
+            }
             .environment(\.feFontScale, CGFloat(fontScale.rawValue))
             .dynamicTypeSize(fontScale.dynamicTypeSize)
             // Capture the hosting NSWindow so broadcast menu commands
