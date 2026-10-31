@@ -202,10 +202,14 @@ private struct QuickLookView: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ view: QLPreviewView, coordinator: ()) {
-        // Force QuickLook to tear the (often WebKit-backed) renderer down
-        // NOW rather than whenever ARC / the window eventually releases
-        // it. Without this, rapidly previewing many files piles up
-        // out-of-process preview extensions until the app is OOM-aborted.
-        view.close()
+        // Release the preview item so QuickLook drops its (often
+        // WebKit-backed) renderer promptly — rapidly previewing many
+        // files used to pile these up until the app was OOM-aborted.
+        //
+        // Do NOT call `view.close()` here: when SwiftUI dismantles the
+        // view while the preview pane is toggled off (or the window is
+        // tearing down), QLPreviewView's own `-deactivate` raises an
+        // assertion (_QLRaiseAssert → abort()) and kills the app.
+        view.previewItem = nil
     }
 }
